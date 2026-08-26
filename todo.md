@@ -12,3 +12,5 @@
 - [x] Package local startup, shutdown, configuration, and health-check scripts for the user’s always-on computer.
 - [x] Provide a deployment-neutral configuration contract and a tested migration guide for moving the same services to a VDS.
 - [x] Make the Nuxt frontend Bun-compatible, resolve the Vue Router/Volar type-check mismatch, and add missing browser static assets.
+- [x] Add an explicit local credential-configuration and PRACTICE-only connection walkthrough to the control plane and runbook.
+- [x] Add a local login page for admin-token authentication, encrypted IQ Option credential submission, and guided PRACTICE-only connection and reconciliation.

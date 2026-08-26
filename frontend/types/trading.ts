@@ -92,3 +92,16 @@ export interface ResearchRun {
   created_at: string
   completed_at: string | null
 }
+
+export interface BrokerConnection {
+  state: string
+  detail: string | null
+  account_mode: 'PRACTICE' | 'REAL' | null
+  balance: number | null
+  currency: string | null
+}
+
+export interface BrokerCredentialInput {
+  email: string
+  password: string
+}

@@ -63,6 +63,7 @@ onMounted(() => {
         <a class="nav-link" href="#risk"><span>03</span> Risk policy</a>
         <a class="nav-link" href="#research"><span>04</span> Research</a>
         <a class="nav-link" href="#evidence"><span>05</span> Evidence log</a>
+        <NuxtLink class="nav-link" to="/setup"><span>06</span> Local setup</NuxtLink>
       </nav>
 
       <div class="rail-foot">
@@ -78,6 +79,7 @@ onMounted(() => {
           <h1>Capital requires a quiet system.</h1>
         </div>
         <div class="topbar-status">
+          <NuxtLink class="setup-link" to="/setup">LOCAL SETUP</NuxtLink>
           <span class="status-dot"></span>
           <span class="mono">{{ sourceStatus }}</span>
         </div>
