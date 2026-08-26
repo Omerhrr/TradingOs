@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title">
+  <title>TradingOS</title>
+  <rect width="64" height="64" fill="#101313"/>
+  <path d="M32 7 52 19v26L32 57 12 45V19Z" fill="none" stroke="#c79a4a" stroke-width="3"/>
+  <path d="M20 37h8l5-13 4 18 5-10h4" fill="none" stroke="#83bbb0" stroke-width="3" stroke-linecap="square" stroke-linejoin="miter"/>
+</svg>

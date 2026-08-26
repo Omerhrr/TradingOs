@@ -1,7 +1,7 @@
 // TradingOS follows The Instrument Room: guarded, low-key, evidence-first operational design.
 export default defineNuxtConfig({
   compatibilityDate: '2026-08-26',
-  devtools: { enabled: true },
+  devtools: { enabled: process.env.NUXT_DEVTOOLS === 'true' },
   css: ['~/assets/css/main.css'],
   modules: ['@nuxtjs/color-mode'],
   colorMode: { preference: 'dark', fallback: 'dark', classSuffix: '' },
@@ -22,7 +22,7 @@ export default defineNuxtConfig({
     head: {
       title: 'TradingOS · Practice Control Plane',
       link: [
-        { rel: 'icon', type: 'image/png', href: '/manus-storage/tradingos-symbol_07b6b184.png' },
+        { rel: 'icon', type: 'image/svg+xml', href: '/favicon.svg' },
       ],
       meta: [
         { name: 'description', content: 'A practice-first control plane for bounded autonomous trading operations.' },

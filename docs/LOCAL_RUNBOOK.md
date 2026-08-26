@@ -4,7 +4,7 @@ TradingOS is designed to run first on the operator’s own computer. Both servic
 
 ## Local prerequisites
 
-Install Python 3.11 or newer, Node.js 22 or newer, and pnpm. From `backend/`, install the package and development dependencies with `pip install -e '.[dev]'`. From `frontend/`, run `pnpm install`. The first broker connection is always PRACTICE-only and does not place an order.
+Install Python 3.11 or newer, Node.js 22 or newer, and Bun 1.3 or newer. From `backend/`, install the package and development dependencies with `pip install -e '.[dev]'`. From `frontend/`, run `bun install`, then use `bun run dev`, `bun run typecheck`, or `bun run build` as needed. The first broker connection is always PRACTICE-only and does not place an order.
 
 Generate an encryption key with `python scripts/generate_encryption_key.py`. Create `backend/.env` locally—do not commit it—with the following values:
 
