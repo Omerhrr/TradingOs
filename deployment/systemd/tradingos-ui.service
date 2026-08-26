@@ -1,0 +1,17 @@
+[Unit]
+Description=TradingOS Nuxt Control Plane
+After=network.target tradingos-api.service
+
+[Service]
+Type=simple
+User=tradingos
+WorkingDirectory=/opt/tradingos/frontend
+Environment=NUXT_PUBLIC_API_BASE_URL=http://127.0.0.1:8000/api/v1
+ExecStart=/usr/bin/node .output/server/index.mjs
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
