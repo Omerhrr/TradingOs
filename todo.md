@@ -11,4 +11,4 @@
 - [x] Document operations, credential handling, data retention, live-mode gates, and the remaining broker-hardening requirements.
 - [x] Package local startup, shutdown, configuration, and health-check scripts for the user’s always-on computer.
 - [x] Provide a deployment-neutral configuration contract and a tested migration guide for moving the same services to a VDS.
-- [ ] Make the Nuxt frontend Bun-compatible, resolve the Vue Router/Volar type-check mismatch, and add missing browser static assets.
+- [x] Make the Nuxt frontend Bun-compatible, resolve the Vue Router/Volar type-check mismatch, and add missing browser static assets.
