@@ -10,14 +10,6 @@ export default defineNuxtConfig({
       apiBaseUrl: process.env.NUXT_PUBLIC_API_BASE_URL || 'http://localhost:8000/api/v1',
     },
   },
-  nitro: {
-    devProxy: {
-      '/manus-storage': {
-        target: 'http://localhost:3000/manus-storage',
-        changeOrigin: true,
-      },
-    },
-  },
   app: {
     head: {
       title: 'TradingOS · Practice Control Plane',

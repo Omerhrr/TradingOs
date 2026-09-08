@@ -21,10 +21,15 @@ class ExecutionService:
         self.broker = broker
         self.settings = settings
 
+    @staticmethod
+    def _as_utc(value: datetime) -> datetime:
+        """SQLite drops tzinfo on write; normalize naive reads to UTC before math."""
+        return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
     def _risk_inputs(self, session: Session, account: AccountConfig, policy: RiskPolicy, symbol: str, timeframe_seconds: int) -> tuple[bool, int, float, float]:
         now = datetime.now(UTC)
         latest_candle = session.scalar(select(Candle).where(Candle.symbol == symbol, Candle.timeframe_seconds == timeframe_seconds).order_by(Candle.open_time.desc()).limit(1))
-        fresh = latest_candle is not None and (now - latest_candle.open_time).total_seconds() <= policy.stale_market_seconds + timeframe_seconds
+        fresh = latest_candle is not None and (now - self._as_utc(latest_candle.open_time)).total_seconds() <= policy.stale_market_seconds + timeframe_seconds
         open_positions = session.scalar(select(func.count()).select_from(PositionSnapshot).where(PositionSnapshot.state.in_(["OPEN", "PENDING", "ACTIVE"]))) or 0
         day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         daily_pnl = session.scalar(select(func.coalesce(func.sum(TradeOutcome.realized_pnl), 0.0)).where(TradeOutcome.settled_at >= day_start)) or 0.0
@@ -50,7 +55,7 @@ class ExecutionService:
         else:
             fresh, open_positions, daily_loss, drawdown = self._risk_inputs(session, account, policy, symbol.upper(), timeframe_seconds)
             decision = gate_entry(account_mode=account.mode, system_state=account.system_state, broker_connected=self.broker.health().state == "CONNECTED", market_is_fresh=fresh, open_positions=open_positions, max_open_positions=policy.max_open_positions, requested_amount=amount, max_trade_amount=policy.max_trade_amount, daily_loss_fraction=daily_loss, max_daily_loss_fraction=policy.max_daily_loss_fraction, drawdown_fraction=drawdown, max_drawdown_fraction=policy.max_drawdown_fraction)
-        intent = OrderIntent(idempotency_key=key, strategy_version_id=strategy_id, symbol=symbol.upper(), mode=AccountMode.PRACTICE.value, side=side.upper(), requested_amount=amount, rationale={"timeframe_seconds": timeframe_seconds, "duration_minutes": duration_minutes, "risk_reason": decision.reason}, status=OrderStatus.APPROVED.value if decision.accepted else OrderStatus.REJECTED.value)
+        intent = OrderIntent(idempotency_key=key, strategy_version_id=strategy_id, symbol=symbol.upper(), mode=AccountMode.PRACTICE.value, side=side.upper(), requested_amount=float(decision.approved_amount) if decision.accepted and decision.approved_amount is not None else amount, rationale={"timeframe_seconds": timeframe_seconds, "duration_minutes": duration_minutes, "risk_reason": decision.reason, "original_requested_amount": amount}, status=OrderStatus.APPROVED.value if decision.accepted else OrderStatus.REJECTED.value)
         session.add(intent)
         session.add(AuditEvent(event_type="ORDER_INTENT_AUTHORIZED" if decision.accepted else "ORDER_INTENT_REJECTED", severity="INFO" if decision.accepted else "WARNING", message=decision.reason, payload={"idempotency_key": key, "symbol": symbol.upper(), "amount": amount, "duration_minutes": duration_minutes}))
         session.commit()

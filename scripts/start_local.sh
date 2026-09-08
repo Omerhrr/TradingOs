@@ -17,7 +17,8 @@ trap cleanup EXIT INT TERM
 
 (cd "$BACKEND" && uvicorn app.main:app --host 127.0.0.1 --port 8000) &
 API_PID=$!
-(cd "$FRONTEND" && NUXT_PUBLIC_API_BASE_URL="http://127.0.0.1:8000/api/v1" pnpm dev --host 127.0.0.1 --port 3001) &
+# The frontend is Bun-managed (see bun.lock and docs/LOCAL_RUNBOOK.md).
+(cd "$FRONTEND" && NUXT_PUBLIC_API_BASE_URL="http://127.0.0.1:8000/api/v1" bun run dev --host 127.0.0.1 --port 3001) &
 UI_PID=$!
 
 echo "TradingOS API: http://127.0.0.1:8000/docs"

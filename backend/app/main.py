@@ -51,7 +51,10 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="TradingOS API", version="0.2.0", description="Practice-only local TradingOS control plane. Real broker execution is unavailable.", lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=settings.allowed_origins, allow_credentials=True, allow_methods=["GET", "POST", "PUT"], allow_headers=["Content-Type", "Authorization"])
+# X-TradingOS-Token must be preflight-allowed: the Nuxt setup page sends it as a
+# custom header from the browser, and a CORS 400 here silently breaks every
+# local admin control (credential storage, practice connect, reconciliation).
+app.add_middleware(CORSMiddleware, allow_origins=settings.allowed_origins, allow_credentials=True, allow_methods=["GET", "POST", "PUT"], allow_headers=["Content-Type", "Authorization", "X-TradingOS-Token"])
 
 
 def _account(session: Session) -> AccountConfig:
@@ -118,7 +121,7 @@ def active_risk_policy(session: Session = Depends(get_session)) -> RiskPolicy:
 
 @app.get(f"{settings.api_prefix}/strategies", response_model=list[StrategyResponse], tags=["strategies"])
 def list_strategies(session: Session = Depends(get_session)) -> list[StrategyVersion]:
-    return list(session.scalars(select(StrategyVersion).order_by(StrategyVersion.created_at.desc())))
+    return list(session.scalars(select(StrategyVersion).order_by(StrategyVersion.id.desc())))
 
 
 @app.post(f"{settings.api_prefix}/strategies", response_model=StrategyResponse, dependencies=[Depends(_require_local_admin)], tags=["strategies"])
@@ -179,17 +182,17 @@ def run_ai_research(strategy_id: int | None = None, session: Session = Depends(g
 
 @app.get(f"{settings.api_prefix}/research/runs", response_model=list[ResearchRunResponse], tags=["research"])
 def list_research_runs(session: Session = Depends(get_session)) -> list[AIResearchRun]:
-    return list(session.scalars(select(AIResearchRun).order_by(AIResearchRun.created_at.desc()).limit(100)))
+    return list(session.scalars(select(AIResearchRun).order_by(AIResearchRun.id.desc()).limit(100)))
 
 
 @app.get(f"{settings.api_prefix}/orders", response_model=list[OrderResponse], tags=["orders"])
 def list_orders(session: Session = Depends(get_session)) -> list[OrderRecord]:
-    return list(session.scalars(select(OrderRecord).order_by(OrderRecord.created_at.desc()).limit(200)))
+    return list(session.scalars(select(OrderRecord).order_by(OrderRecord.id.desc()).limit(200)))
 
 
 @app.get(f"{settings.api_prefix}/order-intents", response_model=list[OrderIntentResponse], tags=["orders"])
 def list_order_intents(session: Session = Depends(get_session)) -> list[OrderIntent]:
-    return list(session.scalars(select(OrderIntent).order_by(OrderIntent.created_at.desc()).limit(200)))
+    return list(session.scalars(select(OrderIntent).order_by(OrderIntent.id.desc()).limit(200)))
 
 
 @app.post(f"{settings.api_prefix}/order-intents", response_model=OrderIntentResponse, dependencies=[Depends(_require_local_admin)], tags=["orders"])
@@ -211,12 +214,14 @@ def submit_practice_order(intent_id: int, session: Session = Depends(get_session
 @app.get(f"{settings.api_prefix}/trades", response_model=list[TradeResponse], tags=["trades"])
 def list_trades(session: Session = Depends(get_session)) -> list[object]:
     from app.models import TradeOutcome
-    return list(session.scalars(select(TradeOutcome).order_by(TradeOutcome.settled_at.desc()).limit(200)))
+    return list(session.scalars(select(TradeOutcome).order_by(TradeOutcome.id.desc()).limit(200)))
 
 
 @app.get(f"{settings.api_prefix}/events", response_model=list[AuditEventResponse], tags=["audit"])
 def list_events(session: Session = Depends(get_session)) -> list[AuditEvent]:
-    return list(session.scalars(select(AuditEvent).order_by(AuditEvent.created_at.desc()).limit(200)))
+    # id ordering guarantees append-only sequence: SQLite's CURRENT_TIMESTAMP
+    # has 1-second granularity, so created_at alone is ambiguous within a second.
+    return list(session.scalars(select(AuditEvent).order_by(AuditEvent.id.desc()).limit(200)))
 
 
 @app.post(f"{settings.api_prefix}/broker/credentials", response_model=BrokerConnectionResponse, dependencies=[Depends(_require_local_admin)], tags=["broker"])
@@ -284,7 +289,7 @@ def list_positions(session: Session = Depends(get_session)) -> list[PositionSnap
 
 @app.get(f"{settings.api_prefix}/reconciliation", response_model=list[ReconciliationResponse], tags=["broker"])
 def list_reconciliation_runs(session: Session = Depends(get_session)) -> list[ReconciliationRun]:
-    return list(session.scalars(select(ReconciliationRun).order_by(ReconciliationRun.started_at.desc()).limit(100)))
+    return list(session.scalars(select(ReconciliationRun).order_by(ReconciliationRun.id.desc()).limit(100)))
 
 
 @app.get(f"{settings.api_prefix}/account/snapshots", tags=["account"])
@@ -310,6 +315,7 @@ def resume_system(session: Session = Depends(get_session)) -> AccountStateRespon
         session.commit()
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Cannot resume: practice mode and a reconciled broker connection are required.")
     account.system_state = SystemState.ACTIVE.value
+    session.add(AuditEvent(event_type="SYSTEM_RESUMED", severity="INFO", message="New exposure resumed against a connected practice broker.", payload={"account_mode": account.mode}))
     session.commit()
     return state(session)
 

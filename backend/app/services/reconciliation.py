@@ -37,7 +37,8 @@ class Reconciler:
         now = datetime.now(UTC)
         run = ReconciliationRun(state="RUNNING", summary={})
         session.add(run)
-        session.flush()
+        session.commit()
+        run_id = run.id
         try:
             account = session.scalar(select(AccountConfig).limit(1))
             if account is None:
@@ -73,9 +74,10 @@ class Reconciler:
 
             positions = self.broker.positions()
             for raw in positions:
-                position_id = str(raw.get("id") or raw.get("external_id") or raw.get("position_id"))
+                position_id = raw.get("id") or raw.get("external_id") or raw.get("position_id")
                 if not position_id:
                     continue
+                position_id = str(position_id)
                 existing = session.scalar(select(PositionSnapshot).where(PositionSnapshot.broker_position_id == position_id))
                 if existing is None:
                     existing = PositionSnapshot(broker_position_id=position_id, instrument_type=str(raw.get("instrument_type", "unknown")))
@@ -110,9 +112,17 @@ class Reconciler:
             session.commit()
             return run
         except Exception as exc:
-            run.state = "FAILED"
-            run.error_message = str(exc)
-            run.finished_at = datetime.now(UTC)
+            # The failed transaction may be poisoned (e.g. an IntegrityError);
+            # roll it back first so the FAILED marker can actually be persisted
+            # instead of raising PendingRollbackError and masking the cause.
+            session.rollback()
+            failed = session.get(ReconciliationRun, run_id)
+            if failed is None:
+                failed = ReconciliationRun(id=run_id, state="FAILED", summary={})
+                session.add(failed)
+            failed.state = "FAILED"
+            failed.error_message = str(exc)
+            failed.finished_at = datetime.now(UTC)
             session.add(AuditEvent(event_type="RECONCILIATION_FAILED", severity="ERROR", message="Broker reconciliation failed; new exposure remains unavailable.", payload={"error_type": type(exc).__name__}))
             session.commit()
             raise

@@ -7,8 +7,8 @@ const isPausing = ref(false)
 const pauseError = ref<string | null>(null)
 const now = ref(new Date())
 const visualAssets = {
-  logo: '/manus-storage/tradingos-symbol_07b6b184.png',
-  hero: '/manus-storage/tradingos-hero-market-intelligence_5abba974.png',
+  logo: '/tradingos-mark.svg',
+  hero: '/tradingos-hero.svg',
 }
 
 const { data: state, pending: statePending, error: stateError, refresh: refreshState } = await useAsyncData<SystemState>('trading-state', api.getState)

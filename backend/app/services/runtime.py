@@ -20,10 +20,12 @@ class LocalRuntime:
         self.session_factory = session_factory
         self.worker = worker
         self._stop = threading.Event()
+        self._halted = threading.Event()
         self._thread: threading.Thread | None = None
 
     def start(self) -> None:
         if self.settings.auto_reconcile_enabled and self._thread is None:
+            self._stop.clear()
             self._thread = threading.Thread(target=self._run, name="tradingos-practice-worker", daemon=True)
             self._thread.start()
 
@@ -31,9 +33,14 @@ class LocalRuntime:
         self._stop.set()
         if self._thread:
             self._thread.join(timeout=10)
+            self._thread = None
         self.worker.disconnect()
 
     def _halt(self, error: Exception) -> None:
+        # Latch the halt: the documented fail-closed contract is that the worker
+        # moves to HALTED and does not resume on its own. Without this latch the
+        # loop below would simply reconnect on the next tick.
+        self._halted.set()
         with self.session_factory() as session:
             account = session.query(AccountConfig).first()
             if account:
@@ -43,6 +50,10 @@ class LocalRuntime:
 
     def _run(self) -> None:
         while not self._stop.is_set():
+            if self._halted.is_set():
+                # Stay down until a human restarts the service. Fail closed.
+                self._stop.wait(self.settings.broker_sync_interval_seconds)
+                continue
             try:
                 with self.session_factory() as session:
                     if self.worker.adapter.health().state != "CONNECTED":

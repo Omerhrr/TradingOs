@@ -67,6 +67,25 @@ class IQAirBrokerAdapter(BrokerAdapter):
         self._client: Any | None = None
         self._health = BrokerHealth()
 
+    @staticmethod
+    def _close_client(client: Any) -> None:
+        """Close the underlying iqair websocket session.
+
+        iqair's IQOptionClient exposes no close() of its own; the live session is
+        owned by its low-level IQOptionAPI (client.api), whose close() stops the
+        websocket and joins its thread. Skipping this leaks an authenticated
+        broker session after every disconnect.
+        """
+        if client is None:
+            return
+        api = getattr(client, "api", None)
+        close = getattr(api, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
+
     def health(self) -> BrokerHealth:
         return self._health
 
@@ -90,7 +109,7 @@ class IQAirBrokerAdapter(BrokerAdapter):
         mode = client.get_balance_mode()
         if mode != "PRACTICE":
             try:
-                client.close()
+                self._close_client(client)
             finally:
                 self._health = BrokerHealth("MODE_MISMATCH", "Broker did not confirm the PRACTICE balance.")
             raise BrokerError("The broker did not confirm PRACTICE balance mode; no operation was started.")
@@ -100,10 +119,7 @@ class IQAirBrokerAdapter(BrokerAdapter):
 
     def disconnect(self) -> None:
         if self._client is not None:
-            try:
-                self._client.close()
-            except Exception:
-                pass
+            self._close_client(self._client)
         self._client = None
         self._health = BrokerHealth("DISCONNECTED", "Broker session closed.")
 

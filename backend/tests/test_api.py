@@ -28,7 +28,15 @@ def test_real_mode_is_hard_disabled() -> None:
     assert "hard-disabled" in response.json()["detail"]
 
 
-def test_local_broker_controls_require_a_configured_admin_token() -> None:
+def test_local_broker_controls_require_a_configured_admin_token(monkeypatch) -> None:
+    """The unconfigured-token path must fail closed with 503.
+
+    conftest.py configures a token for the suite, so this test temporarily
+    removes it to exercise the guard itself.
+    """
+    from app.main import settings
+
+    monkeypatch.setattr(settings, "local_admin_token", None)
     with TestClient(app) as client:
         response = client.post("/api/v1/broker/connect")
     assert response.status_code == 503
