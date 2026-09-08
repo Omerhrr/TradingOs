@@ -366,6 +366,12 @@ class ComparisonEvaluation(BaseModel):
     metrics: dict
 
 
+class ComparisonEquityPoint(BaseModel):
+    index: int
+    settled_at: datetime
+    equity: float
+
+
 class StrategyComparisonRow(BaseModel):
     strategy_version_id: int
     strategy_key: str
@@ -376,6 +382,7 @@ class StrategyComparisonRow(BaseModel):
     live: ComparisonLive
     activity: ComparisonActivity
     evaluation: ComparisonEvaluation
+    equity_curve: list[ComparisonEquityPoint] = []
 
 
 class StrategyComparisonResponse(BaseModel):
@@ -385,6 +392,7 @@ class StrategyComparisonResponse(BaseModel):
 
 class AuthLoginInput(BaseModel):
     token: str = Field(min_length=1, max_length=256)
+    totp_code: str | None = Field(default=None, min_length=1, max_length=12)
 
 
 class AuthLoginResponse(BaseModel):
@@ -397,3 +405,96 @@ class AuthSessionResponse(BaseModel):
     authenticated: bool
     remote_access: bool
     expires_at: datetime | None = None
+    totp_required: bool = False
+
+
+class TotpProvisionResponse(BaseModel):
+    """The provisioning material is returned exactly once and never persisted in plaintext."""
+
+    secret: str
+    otpauth_uri: str
+
+
+class TotpStatusResponse(BaseModel):
+    required: bool
+    provisioned: bool
+
+
+class BacktestParams(BaseModel):
+    fast_window: int
+    slow_window: int
+    volatility_window: int
+    max_drawdown: float | None = None
+
+
+class BacktestMetrics(BaseModel):
+    trades: int
+    wins: int
+    win_rate: float
+    total_return: float
+    max_drawdown: float
+    average_trade_return: float
+    method: str
+    censor_gap_seconds: int
+
+
+class BacktestEquityPoint(BaseModel):
+    index: int
+    open_time: datetime
+    trade_return: float | None
+    equity: float
+
+
+class BacktestTradeRow(BaseModel):
+    index: int
+    decision_time: datetime
+    entry_time: datetime
+    exit_time: datetime
+    signal: str
+    entry_close: float
+    exit_close: float
+    trade_return: float
+
+
+class BacktestRunInput(BaseModel):
+    strategy_version_id: int | None = None
+    definition: dict | None = None
+    symbol: str = Field(min_length=1, max_length=80)
+    timeframe_seconds: int = Field(default=60, ge=1, le=86_400)
+    censor_gap_seconds: int = Field(default=60, ge=1, le=86_400)
+
+
+class BacktestRunResponse(BaseModel):
+    symbol: str
+    timeframe_seconds: int
+    censor_gap_seconds: int
+    params: BacktestParams
+    metrics: BacktestMetrics
+    equity_curve: list[BacktestEquityPoint]
+    trades: list[BacktestTradeRow]
+    generated_at: datetime
+
+
+class BacktestSweepInput(BaseModel):
+    symbol: str = Field(min_length=1, max_length=80)
+    timeframe_seconds: int = Field(default=60, ge=1, le=86_400)
+    censor_gap_seconds: int = Field(default=60, ge=1, le=86_400)
+    fast_windows: list[int] = Field(min_length=1, max_length=12)
+    slow_windows: list[int] = Field(min_length=1, max_length=12)
+    volatility_window: int = Field(default=20, ge=1, le=500)
+
+
+class BacktestSweepCell(BaseModel):
+    fast_window: int
+    slow_window: int
+    metrics: BacktestMetrics | None = None
+    error: str | None = None
+
+
+class BacktestSweepResponse(BaseModel):
+    symbol: str
+    timeframe_seconds: int
+    censor_gap_seconds: int
+    volatility_window: int
+    cells: list[BacktestSweepCell]
+    generated_at: datetime

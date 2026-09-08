@@ -1,6 +1,6 @@
 <!-- Design: The Instrument Room — a local-only, high-trust setup console where safety and evidence are more prominent than action. -->
 <script setup lang="ts">
-import type { BrokerConnection, ReconciliationRun } from '~/types/trading'
+import type { BrokerConnection, ReconciliationRun, TotpProvision, TotpStatus } from '~/types/trading'
 
 const api = useTradingApi()
 const adminToken = ref('')
@@ -13,6 +13,10 @@ const notice = ref<string | null>(null)
 const credentialStored = ref(false)
 const connection = ref<BrokerConnection | null>(null)
 const reconciliation = ref<ReconciliationRun | null>(null)
+const totpProvision = ref<TotpProvision | null>(null)
+const totpState = ref<TotpStatus | null>(null)
+const totpBusy = ref(false)
+const totpError = ref<string | null>(null)
 
 function messageFor(error: unknown, fallback: string) {
   if (error && typeof error === 'object' && 'data' in error) {
@@ -24,6 +28,7 @@ function messageFor(error: unknown, fallback: string) {
 
 onMounted(() => {
   adminToken.value = window.sessionStorage.getItem('tradingos-local-admin-token') ?? ''
+  refreshTotpState()
 })
 
 async function storeCredentials() {
@@ -71,6 +76,42 @@ async function runReconciliation() {
     errorMessage.value = messageFor(error, 'Reconciliation could not be completed. New exposure remains paused.')
   } finally {
     busy.value = null
+  }
+}
+
+async function refreshTotpState() {
+  if (!adminToken.value.trim()) return
+  try {
+    totpState.value = await api.totpStatus(adminToken.value.trim())
+  } catch {
+    totpState.value = null
+  }
+}
+
+async function provisionTotpSecret() {
+  totpError.value = null
+  totpBusy.value = true
+  try {
+    totpProvision.value = await api.provisionTotp(adminToken.value.trim())
+    window.sessionStorage.setItem('tradingos-local-admin-token', adminToken.value.trim())
+    await refreshTotpState()
+  } catch (error) {
+    totpError.value = messageFor(error, 'The authenticator secret could not be provisioned. Check the API and token.')
+  } finally {
+    totpBusy.value = false
+  }
+}
+
+async function disableTotpSecret() {
+  totpError.value = null
+  totpBusy.value = true
+  try {
+    totpState.value = await api.disableTotp(adminToken.value.trim())
+    totpProvision.value = null
+  } catch (error) {
+    totpError.value = messageFor(error, 'The authenticator secret could not be disabled.')
+  } finally {
+    totpBusy.value = false
   }
 }
 
@@ -136,5 +177,29 @@ const isPracticeConnected = computed(() => connection.value?.state === 'CONNECTE
       </div>
       <p v-if="reconciliation" class="setup-summary">Latest run: <strong>{{ reconciliation.state }}</strong> · {{ reconciliation.summary?.candles_ingested ?? 0 }} candles ingested · {{ reconciliation.summary?.positions_observed ?? 0 }} positions observed.</p>
     </section>
+
+    <section class="setup-card setup-card--actions">
+      <div class="setup-heading"><div><p class="mono eyebrow">03 / LOGIN HARDENING</p><h2>Two-factor provisioning</h2></div><span :class="['connection-chip', { 'connection-chip--ready': totpState?.provisioned }]">{{ totpState?.provisioned ? 'SECRET PROVISIONED' : 'TOKEN ONLY' }}</span></div>
+      <p v-if="totpError" class="setup-error">{{ totpError }}</p>
+      <div class="setup-actions">
+        <button class="setup-action setup-action--quiet" type="button" :disabled="totpBusy || !adminToken.trim()" @click="provisionTotpSecret">{{ totpBusy ? 'WORKING…' : 'PROVISION AUTHENTICATOR SECRET' }}</button>
+        <button v-if="totpState?.provisioned" class="setup-action setup-action--quiet pause-control" type="button" :disabled="totpBusy" @click="disableTotpSecret">DISABLE SECRET</button>
+      </div>
+      <p class="setup-summary">Provisioning returns the base32 secret and its otpauth URI exactly once — enter them into any TOTP authenticator app, then set <strong>TRADINGOS_TOTP_REQUIRED=true</strong> on the backend to enforce the code at sign-in. Rotation replaces the old secret; disabling makes a required gate fail closed.</p>
+      <div v-if="totpProvision" class="setup-warning totp-reveal">
+        <span>!</span>
+        <div>
+          <p><strong>Shown once — store it now.</strong></p>
+          <p class="mono totp-secret">{{ totpProvision.secret }}</p>
+          <p class="mono totp-uri">{{ totpProvision.otpauth_uri }}</p>
+        </div>
+      </div>
+    </section>
   </main>
 </template>
+
+<style scoped>
+.totp-reveal { align-items: flex-start; }
+.totp-secret { font-size: 13px; letter-spacing: .12em; color: var(--paper); margin: 4px 0; }
+.totp-uri { font-size: 10px; color: var(--quiet); margin: 0; overflow-wrap: anywhere; }
+</style>

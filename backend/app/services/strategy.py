@@ -102,14 +102,23 @@ def _max_drawdown(equity: list[float]) -> float:
     return maximum
 
 
-def evaluate_ema_strategy(candles: list[Candle], definition: dict, censor_gap_seconds: int) -> dict:
-    """Walk forward with the decision at candle i and entry/exit strictly after its censor gap."""
+def walk_forward_detail(candles: list[Candle], definition: dict, censor_gap_seconds: int) -> dict:
+    """Time-ordered walk-forward with the full per-trade evidence trail.
+
+    The decision happens at candle ``i``; entry and exit sit strictly after
+    the censor gap, so no trade ever looks into the future. Returns the same
+    metrics dict the persisted evaluation stores, plus the per-trade rows and
+    the multiplicative equity curve the backtest runner renders. This is the
+    single source of truth: ``evaluate_ema_strategy`` is its summary, so the
+    persisted evaluation and the read-only backtest runner can never disagree.
+    """
     if len(candles) < 30:
         raise ValueError("At least 30 candles are required for a meaningful evaluation.")
     ordered = sorted(candles, key=lambda candle: candle.open_time)
     features = calculate_features([CandlePoint(c.open_time, c.close_price, c.high_price, c.low_price) for c in ordered], fast_window=int(definition.get("fast_window", 12)), slow_window=int(definition.get("slow_window", 26)), volatility_window=int(definition.get("volatility_window", 20)))
-    trades: list[float] = []
-    equity = [1.0]
+    trades: list[dict] = []
+    equity = 1.0
+    equity_curve: list[dict] = [{"index": 0, "open_time": ordered[0].open_time, "trade_return": None, "equity": 1.0}]
     for index in range(max(int(definition.get("slow_window", 26)), 1), len(ordered) - 2):
         decision_time = ordered[index].open_time
         entry = ordered[index + 1]
@@ -121,11 +130,18 @@ def evaluate_ema_strategy(candles: list[Candle], definition: dict, censor_gap_se
             continue
         move = (exit_candle.close_price / entry.close_price) - 1 if entry.close_price else 0.0
         trade_return = move if signal == "CALL" else -move
-        trades.append(trade_return)
-        equity.append(equity[-1] * (1 + trade_return))
-    wins = sum(1 for value in trades if value > 0)
-    total_return = equity[-1] - 1
-    return {"trades": len(trades), "wins": wins, "win_rate": wins / len(trades) if trades else 0.0, "total_return": total_return, "max_drawdown": _max_drawdown(equity), "average_trade_return": sum(trades) / len(trades) if trades else 0.0, "method": "ema_cross_walk_forward", "censor_gap_seconds": censor_gap_seconds}
+        equity *= 1 + trade_return
+        trades.append({"index": index, "decision_time": decision_time, "entry_time": entry.open_time, "exit_time": exit_candle.open_time, "signal": signal, "entry_close": entry.close_price, "exit_close": exit_candle.close_price, "trade_return": trade_return})
+        equity_curve.append({"index": len(equity_curve), "open_time": exit_candle.open_time, "trade_return": trade_return, "equity": equity})
+    wins = sum(1 for trade in trades if trade["trade_return"] > 0)
+    returns = [trade["trade_return"] for trade in trades]
+    metrics = {"trades": len(trades), "wins": wins, "win_rate": wins / len(trades) if trades else 0.0, "total_return": equity - 1, "max_drawdown": _max_drawdown([point["equity"] for point in equity_curve]), "average_trade_return": sum(returns) / len(returns) if returns else 0.0, "method": "ema_cross_walk_forward", "censor_gap_seconds": censor_gap_seconds}
+    return {"metrics": metrics, "trades": trades, "equity_curve": equity_curve}
+
+
+def evaluate_ema_strategy(candles: list[Candle], definition: dict, censor_gap_seconds: int) -> dict:
+    """Walk forward with the decision at candle i and entry/exit strictly after its censor gap."""
+    return walk_forward_detail(candles, definition, censor_gap_seconds)["metrics"]
 
 
 def evaluate_strategy(session: Session, strategy: StrategyVersion, symbol: str, timeframe_seconds: int, censor_gap_seconds: int) -> StrategyEvaluation:

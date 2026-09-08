@@ -221,8 +221,9 @@ function socketEventNote(type: string, payload: Record<string, unknown>): string
         <NuxtLink class="nav-link" to="/strategies"><span>06</span> Strategy desk</NuxtLink>
         <NuxtLink class="nav-link" to="/analytics"><span>07</span> Outcome analytics</NuxtLink>
         <NuxtLink class="nav-link" to="/compare"><span>08</span> Strategy compare</NuxtLink>
-        <a class="nav-link" href="#evidence"><span>09</span> Evidence log</a>
-        <NuxtLink class="nav-link" to="/setup"><span>10</span> Local setup</NuxtLink>
+        <NuxtLink class="nav-link" to="/backtest"><span>09</span> Backtest lab</NuxtLink>
+        <a class="nav-link" href="#evidence"><span>10</span> Evidence log</a>
+        <NuxtLink class="nav-link" to="/setup"><span>11</span> Local setup</NuxtLink>
       </nav>
 
       <div class="rail-foot">

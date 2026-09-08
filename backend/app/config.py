@@ -25,6 +25,10 @@ class Settings(BaseSettings):
     session_secret: str | None = None
     session_ttl_minutes: int = Field(default=720, ge=5, le=10_080)
     remote_public_tls: bool = False
+    # Two-factor gate for the interactive /auth/login exchange. Off by default;
+    # when on, a provisioned TOTP code is demanded after the admin token check.
+    # The header/bearer admin-token paths are machine credentials and unchanged.
+    totp_required: bool = False
     broker_sync_interval_seconds: int = Field(default=30, ge=10, le=3_600)
     broker_asset_refresh_seconds: int = Field(default=300, ge=60, le=86_400)
     broker_candle_count: int = Field(default=200, ge=20, le=1_000)

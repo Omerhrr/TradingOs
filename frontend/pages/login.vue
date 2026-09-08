@@ -4,10 +4,12 @@ const auth = useAuth()
 const route = useRoute()
 
 const token = ref('')
+const totpCode = ref('')
 const reveal = ref(false)
 const submitting = ref(false)
 const errorMessage = ref<string | null>(null)
 const notice = ref<string | null>(null)
+const totpRequired = computed(() => auth.session.value?.totp_required ?? false)
 const redirectTarget = computed(() => {
   const target = route.query.redirect
   return typeof target === 'string' && target.startsWith('/') && !target.startsWith('//') ? target : '/'
@@ -18,22 +20,31 @@ async function signIn() {
     errorMessage.value = 'The local admin token is required to open a session.'
     return
   }
+  if (totpRequired.value && !totpCode.value.trim()) {
+    errorMessage.value = 'The authenticator code is required while two-factor sign-in is enforced.'
+    return
+  }
   submitting.value = true
   errorMessage.value = null
   notice.value = null
   try {
-    await auth.login(token.value.trim())
+    await auth.login(token.value.trim(), totpRequired.value ? totpCode.value.trim() : undefined)
     token.value = ''
+    totpCode.value = ''
     restartLoopSocket() // the live channel may have been refused before the session opened
     await navigateTo(redirectTarget.value)
   } catch (error) {
     const detail = error instanceof Error ? error.message : ''
     if (detail.includes('429') || detail.toLowerCase().includes('too many')) {
       errorMessage.value = 'Too many failed sign-ins from this address. Wait for the lockout window to pass and try again.'
-    } else if (detail.includes('401') || detail.toLowerCase().includes('invalid')) {
-      errorMessage.value = 'That admin token is invalid. The attempt has been recorded in the audit ledger.'
+    } else if (detail.includes('503') && detail.toLowerCase().includes('provision')) {
+      errorMessage.value = 'Two-factor sign-in is enforced but no authenticator secret is provisioned yet. Provision one from the Local setup page with the admin token.'
     } else if (detail.includes('503')) {
       errorMessage.value = 'The backend has no TRADINGOS_LOCAL_ADMIN_TOKEN configured, so sign-ins are unavailable.'
+    } else if (detail.includes('401') || detail.toLowerCase().includes('invalid')) {
+      errorMessage.value = totpRequired.value
+        ? 'The token or the verification code was rejected. Wrong codes are rate limited and recorded in the audit ledger.'
+        : 'That admin token is invalid. The attempt has been recorded in the audit ledger.'
     } else {
       errorMessage.value = 'The sign-in could not be confirmed by the local API.'
     }
@@ -89,6 +100,20 @@ useHead({ title: 'TradingOS · Sign in' })
           </div>
           <small>Found in the backend environment as TRADINGOS_LOCAL_ADMIN_TOKEN. Failed attempts are rate limited per address and recorded in the evidence log.</small>
         </label>
+        <label v-if="totpRequired" class="field-token">
+          <span>AUTHENTICATOR CODE</span>
+          <input
+            v-model="totpCode"
+            type="text"
+            name="tradingos-totp-code"
+            inputmode="numeric"
+            autocomplete="one-time-code"
+            maxlength="6"
+            placeholder="6-digit code"
+            class="mono"
+          >
+          <small>Two-factor sign-in is enforced: the code comes from the authenticator app provisioned for this control plane.</small>
+        </label>
         <p v-if="errorMessage" class="setup-error">{{ errorMessage }}</p>
         <p v-if="notice" class="setup-notice">{{ notice }}</p>
         <button class="setup-action" type="submit" :disabled="submitting">
@@ -124,6 +149,13 @@ useHead({ title: 'TradingOS · Sign in' })
           <div>
             <strong>Failures are evidence too</strong>
             <p>Five invalid attempts inside the window lock the source address out until the window drains. Every attempt lands in the append-only audit ledger.</p>
+          </div>
+        </li>
+        <li v-if="totpRequired" class="is-complete">
+          <span>04</span>
+          <div>
+            <strong>The second factor rides on top</strong>
+            <p>With TRADINGOS_TOTP_REQUIRED set, the token alone opens nothing: a 6-digit authenticator code is demanded at sign-in, and wrong codes count toward the same lockout.</p>
           </div>
         </li>
       </ol>

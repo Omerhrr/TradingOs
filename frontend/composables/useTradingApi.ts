@@ -1,5 +1,5 @@
 // TradingOS follows The Instrument Room: guarded, low-key, evidence-first operational design.
-import type { AuditEvent, AuthLogin, AuthSession, BrokerConnection, BrokerCredentialInput, LoopRun, LoopStatus, MarketChart, OrderIntent, PositionSnapshot, ReconciliationRun, ResearchRun, RiskPolicy, StrategyComparison, StrategyDefinition, StrategyEvaluation, StrategyStatusInput, StrategyVersion, SystemState, TradeAnalytics, WatchlistItem } from '~/types/trading'
+import type { AuditEvent, AuthLogin, AuthSession, BacktestRun, BacktestSweep, BrokerConnection, BrokerCredentialInput, LoopRun, LoopStatus, MarketChart, OrderIntent, PositionSnapshot, ReconciliationRun, ResearchRun, RiskPolicy, StrategyComparison, StrategyDefinition, StrategyEvaluation, StrategyStatusInput, StrategyVersion, SystemState, TotpProvision, TotpStatus, TradeAnalytics, WatchlistItem } from '~/types/trading'
 
 export function useTradingApi() {
   const config = useRuntimeConfig()
@@ -48,6 +48,11 @@ export function useTradingApi() {
     getMarketChart: (symbol: string, timeframeSeconds: number, limit = 120) =>
       request<MarketChart>(`/market/chart?symbol=${encodeURIComponent(symbol)}&timeframe_seconds=${timeframeSeconds}&limit=${limit}`),
     getStrategyEvaluations: (strategyId: number) => request<StrategyEvaluation[]>(`/strategies/${strategyId}/evaluations`),
+    runBacktest: (adminToken: string, payload: { strategy_version_id?: number; definition?: Record<string, unknown>; symbol: string; timeframe_seconds: number; censor_gap_seconds: number }) => localControl<BacktestRun>('/backtest/run', adminToken, { method: 'POST', body: payload }),
+    runBacktestSweep: (adminToken: string, payload: { symbol: string; timeframe_seconds: number; censor_gap_seconds: number; fast_windows: number[]; slow_windows: number[]; volatility_window: number }) => localControl<BacktestSweep>('/backtest/sweep', adminToken, { method: 'POST', body: payload }),
+    provisionTotp: (adminToken: string) => localControl<TotpProvision>('/auth/totp/provision', adminToken, { method: 'POST' }),
+    totpStatus: (adminToken: string) => localControl<TotpStatus>('/auth/totp/status', adminToken),
+    disableTotp: (adminToken: string) => localControl<TotpStatus>('/auth/totp/disable', adminToken, { method: 'POST' }),
     createStrategy: (adminToken: string, payload: { strategy_key: string; version: string; definition: StrategyDefinition }) => localControl<StrategyVersion>('/strategies', adminToken, { method: 'POST', body: payload }),
     updateStrategyStatus: (adminToken: string, strategyId: number, payload: StrategyStatusInput) => localControl<StrategyVersion>(`/strategies/${strategyId}/status`, adminToken, { method: 'PUT', body: payload }),
     evaluateStrategy: (adminToken: string, strategyId: number, payload: { symbol: string; timeframe_seconds: number; censor_gap_seconds: number }) => localControl<StrategyEvaluation>(`/strategies/${strategyId}/evaluate`, adminToken, { method: 'POST', body: payload }),

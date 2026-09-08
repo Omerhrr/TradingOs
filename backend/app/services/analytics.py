@@ -157,6 +157,7 @@ def strategy_comparison(session: Session) -> dict[str, Any]:
         outcomes_by_strategy.setdefault(intent.strategy_version_id, []).append({
             "realized_pnl": float(outcome.realized_pnl),
             "outcome": outcome.outcome,
+            "settled_at": outcome.settled_at,
         })
 
     latest_evaluations = {
@@ -175,12 +176,15 @@ def strategy_comparison(session: Session) -> dict[str, Any]:
         gross_loss = abs(sum(pnl for pnl in pnls if pnl < 0))
 
         # Drawdown over this strategy's own equity slice only, so a strategy
-        # cannot inherit a hole another one dug.
+        # cannot inherit a hole another one dug. The same pass records the
+        # cumulative equity curve the comparison overlay renders.
         equity = peak = max_drawdown = 0.0
-        for pnl in pnls:
+        equity_curve: list[dict[str, Any]] = []
+        for order_index, pnl in enumerate(pnls, start=1):
             equity += pnl
             peak = max(peak, equity)
             max_drawdown = max(max_drawdown, peak - equity)
+            equity_curve.append({"index": order_index, "settled_at": bucket[order_index - 1]["settled_at"], "equity": round(equity, 6)})
 
         intents = list(session.scalars(select(OrderIntent).where(OrderIntent.strategy_version_id == strategy.id)))
         intent_states = [intent.status for intent in intents]
@@ -224,6 +228,7 @@ def strategy_comparison(session: Session) -> dict[str, Any]:
                 "evaluated_at": evaluation.created_at if evaluation else None,
                 "metrics": evaluation.metrics if evaluation else {},
             },
+            "equity_curve": equity_curve,
         })
 
     return {"strategies": rows, "generated_at": datetime.now(UTC)}

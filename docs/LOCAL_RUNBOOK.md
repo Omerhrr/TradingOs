@@ -16,6 +16,7 @@ TRADINGOS_CREDENTIAL_ENCRYPTION_KEY=the-generated-fernet-key
 TRADINGOS_AUTO_RECONCILE_ENABLED=false
 TRADINGOS_PRACTICE_EXECUTION_ENABLED=false
 TRADINGOS_REAL_EXECUTION_ENABLED=false
+TRADINGOS_TOTP_REQUIRED=false
 ```
 
 Run `bash scripts/start_local.sh` from the repository root. Verify the service using `python scripts/healthcheck.py` and `python scripts/verify_practice_boundary.py`. The FastAPI interactive API documentation is then available at `http://127.0.0.1:8000/docs`, and the Nuxt control plane is at `http://127.0.0.1:3001`.
@@ -23,6 +24,12 @@ Run `bash scripts/start_local.sh` from the repository root. Verify the service u
 After encrypted credentials have been stored and a manual PRACTICE connection and reconciliation have succeeded, setting `TRADINGOS_AUTO_RECONCILE_ENABLED=true` starts a single local background worker. It maintains one practice-broker session and reconciles on the configured interval. On a background connection or reconciliation error, the worker moves the account to `HALTED`, disconnects the broker, and does not resume on its own. The loop starts disabled by default.
 
 > The credential endpoint requires `X-TradingOS-Token` and stores only Fernet-encrypted values in the local SQLAlchemy database. Keep the encryption key and local admin token outside the repository and password manager-sync them as separate secrets.
+
+## Backtest lab and two-factor login
+
+The **Backtest lab** (`/backtest` in the control plane) runs read-only walk-forward previews over candles the broker worker already stored: one run returns headline metrics, the multiplicative equity curve, and every simulated trade, and the sweep draws a bounded fast × slow EMA grid (24 cells max per request). The runner never persists an evaluation, changes strategy status, writes audit rows, or touches the broker — promoting a parameter set still happens on the Strategy desk through the persisted evaluation.
+
+For remote deployments the interactive sign-in can demand a second factor. Set `TRADINGOS_TOTP_REQUIRED=true`, then provision a secret from the Local setup page (`POST /api/v1/auth/totp/provision`): the base32 secret and its `otpauth://` URI are shown exactly once, enter them into any TOTP authenticator app, and the 6-digit code is demanded at `POST /auth/login` from then on. Wrong codes count toward the per-IP lockout, provisioning is audited, and the plaintext secret never reaches the database, logs, or audit ledger. The admin-token header/bearer paths are machine credentials and remain code-free; a required-but-disabled secret fails closed.
 
 ## VDS migration contract
 

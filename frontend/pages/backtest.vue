@@ -1,0 +1,342 @@
+<!-- Design: The Instrument Room — the lab proves parameters on stored candles before any version earns risk. -->
+<script setup lang="ts">
+import type { BacktestRun, BacktestSweep, StrategyVersion } from '~/types/trading'
+
+const api = useTradingApi()
+
+const adminToken = ref('')
+const strategies = ref<StrategyVersion[]>([])
+const strategiesLoading = ref(true)
+
+const source = ref<'strategy' | 'custom'>('strategy')
+const strategyId = ref<number | null>(null)
+const symbol = ref('EURUSD')
+const timeframeSeconds = ref(60)
+const censorGapSeconds = ref(60)
+const customFast = ref(8)
+const customSlow = ref(30)
+const customVol = ref(20)
+
+const sweepFast = ref('4, 8, 12, 16')
+const sweepSlow = ref('24, 34, 48, 60')
+const sweepRunning = ref(false)
+const sweep = ref<BacktestSweep | null>(null)
+const sweepError = ref<string | null>(null)
+const sweepLens = [
+  { key: 'total_return', label: 'RETURN' },
+  { key: 'win_rate', label: 'WIN RATE' },
+  { key: 'max_drawdown', label: 'MAX DD' },
+] as const
+type SweepLens = typeof sweepLens[number]['key']
+const sweepFocus = ref<SweepLens>('total_return')
+
+const running = ref(false)
+const result = ref<BacktestRun | null>(null)
+const runError = ref<string | null>(null)
+
+const CurveGeometryWidth = 600
+const CurveGeometryHeight = 220
+const curveGeometry = computed(() => {
+  const points = result.value?.equity_curve ?? []
+  if (points.length < 2) return null
+  const pad = 10
+  const min = Math.min(0.95, ...points.map(p => p.equity))
+  const max = Math.max(1.05, ...points.map(p => p.equity))
+  const span = max - min || 1
+  const x = (i: number) => pad + (i / (points.length - 1)) * (CurveGeometryWidth - 2 * pad)
+  const y = (v: number) => CurveGeometryHeight - pad - ((v - min) / span) * (CurveGeometryHeight - 2 * pad)
+  const line = points.map((p, i) => `${i === 0 ? 'M' : 'L'}${x(i).toFixed(1)},${y(p.equity).toFixed(1)}`).join(' ')
+  const lastPoint = points[points.length - 1]
+  if (!lastPoint) return null
+  return { line, baseline: y(1).toFixed(1), endY: y(lastPoint.equity) }
+})
+
+const sweepGrid = computed(() => {
+  const cells = sweep.value?.cells ?? []
+  const fastValues = [...new Set(cells.map(c => c.fast_window))].sort((a, b) => a - b)
+  const slowValues = [...new Set(cells.map(c => c.slow_window))].sort((a, b) => a - b)
+  const byPair = new Map(cells.map(c => [`${c.fast_window}:${c.slow_window}`, c]))
+  const values = cells
+    .map(c => sweepMetric(c))
+    .filter((v): v is number => v !== null)
+  const min = Math.min(...values, 0)
+  const max = Math.max(...values, 0)
+  return { fastValues, slowValues, byPair, min, max }
+})
+
+function sweepMetric(cell: { metrics: { total_return: number; win_rate: number; max_drawdown: number } | null; error: string | null }): number | null {
+  if (!cell.metrics) return null
+  if (sweepFocus.value === 'max_drawdown') return -cell.metrics.max_drawdown // drawn inverted: higher is better
+  return cell.metrics[sweepFocus.value]
+}
+
+function cellStyle(cell: { metrics: { total_return: number; win_rate: number; max_drawdown: number } | null; error: string | null }): string {
+  const value = sweepMetric(cell)
+  if (value === null) return 'background: rgba(235,232,223,.04)'
+  const { min, max } = sweepGrid.value
+  const span = max - min || 1
+  const intensity = 0.12 + 0.55 * ((value - min) / span)
+  return value >= 0
+    ? `background: rgba(131, 187, 176, ${intensity.toFixed(3)})`
+    : `background: rgba(207, 106, 92, ${intensity.toFixed(3)})`
+}
+
+function parseWindows(raw: string): number[] {
+  return [...new Set(raw.split(/[,;\s]+/).map(part => Number.parseInt(part, 10)).filter(value => Number.isFinite(value) && value > 0))]
+}
+
+async function loadStrategies() {
+  strategiesLoading.value = true
+  try {
+    strategies.value = await api.getStrategies()
+    const firstStrategy = strategies.value[0]
+    if (strategyId.value === null && firstStrategy) strategyId.value = firstStrategy.id
+  } catch {
+    strategies.value = []
+  } finally {
+    strategiesLoading.value = false
+  }
+}
+
+function requireToken(): string | null {
+  if (adminToken.value.trim()) return adminToken.value
+  runError.value = 'The local admin token is required to drive the lab. Paste it below; it stays in this tab.'
+  return null
+}
+
+async function runBacktest(override?: { fast: number; slow: number; vol?: number }) {
+  const token = requireToken()
+  if (!token) return
+  running.value = true
+  runError.value = null
+  try {
+    const payload: Record<string, unknown> = {
+      symbol: symbol.value.trim().toUpperCase(),
+      timeframe_seconds: timeframeSeconds.value,
+      censor_gap_seconds: censorGapSeconds.value,
+    }
+    if (override) {
+      payload.definition = { kind: 'ema_cross', fast_window: override.fast, slow_window: override.slow, volatility_window: override.vol ?? customVol.value }
+    } else if (source.value === 'strategy') {
+      if (!strategyId.value) { runError.value = 'Create a strategy version first — the lab runs stored definitions or inline custom ones.'; return }
+      payload.strategy_version_id = strategyId.value
+    } else {
+      if (customFast.value >= customSlow.value) { runError.value = 'The fast EMA window must be smaller than the slow one.'; return }
+      payload.definition = { kind: 'ema_cross', fast_window: customFast.value, slow_window: customSlow.value, volatility_window: customVol.value }
+    }
+    result.value = await api.runBacktest(token, payload as Parameters<typeof api.runBacktest>[1])
+    window.sessionStorage.setItem('tradingos-local-admin-token', token)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : ''
+    runError.value = message.includes('422')
+      ? 'The runner refused the request: at least 30 stored candles are needed, windows must be valid, and the censor gap must leave room to trade.'
+      : message.includes('401')
+        ? 'The admin token was rejected. Check it and try again.'
+        : message.includes('404')
+          ? 'That strategy version no longer exists.'
+          : 'The backtest could not be completed against the local API.'
+  } finally {
+    running.value = false
+  }
+}
+
+async function runSweep() {
+  const token = requireToken()
+  if (!token) return
+  const fasts = parseWindows(sweepFast.value)
+  const slows = parseWindows(sweepSlow.value)
+  if (!fasts.length || !slows.length) { sweepError.value = 'Enter comma-separated positive integers for both window ranges.'; return }
+  if (fasts.length * slows.length > 24) { sweepError.value = 'The grid is capped at 24 cells server-side; narrow the ranges.'; return }
+  sweepRunning.value = true
+  sweepError.value = null
+  try {
+    sweep.value = await api.runBacktestSweep(token, {
+      symbol: symbol.value.trim().toUpperCase(),
+      timeframe_seconds: timeframeSeconds.value,
+      censor_gap_seconds: censorGapSeconds.value,
+      fast_windows: fasts,
+      slow_windows: slows,
+      volatility_window: customVol.value,
+    })
+    window.sessionStorage.setItem('tradingos-local-admin-token', token)
+  } catch (error) {
+    sweepError.value = error instanceof Error ? error.message : 'The sweep could not be completed.'
+  } finally {
+    sweepRunning.value = false
+  }
+}
+
+function percent(value: number | null | undefined): string {
+  return value === null || value === undefined ? '—' : `${(value * 100).toFixed(2)}%`
+}
+
+function moneyish(value: number): string {
+  return `${value >= 0 ? '+' : '−'}${Math.abs(value * 100).toFixed(2)}%`
+}
+
+onMounted(() => {
+  adminToken.value = window.sessionStorage.getItem('tradingos-local-admin-token') ?? ''
+  loadStrategies()
+})
+
+useHead({ title: 'TradingOS · Backtest Lab' })
+</script>
+
+<template>
+  <div class="setup-shell">
+    <header class="setup-topbar">
+      <p class="mono micro">BACKTEST LAB / STORED CANDLES · NO FORWARD LOOKING</p>
+      <NuxtLink class="return-link" to="/">&larr; CONTROL PLANE</NuxtLink>
+    </header>
+
+    <section class="setup-hero setup-hero--tight">
+      <p class="mono eyebrow">STRATEGY DESK / LAB</p>
+      <h1>Prove the <em>parameters</em> before they earn risk.</h1>
+      <p>The runner walks forward over candles the control plane already stores — decision at candle i, entry and exit strictly after the censor gap — and writes nothing: no evaluations, no status, no audit rows. Committing a result still happens on the Strategy desk.</p>
+    </section>
+
+    <section class="setup-card setup-card--form">
+      <div class="setup-heading">
+        <div>
+          <p class="mono micro">RUNNER INPUT</p>
+          <h2>What should the walker test?</h2>
+        </div>
+        <span class="connection-chip">{{ strategies.length }} STORED VERSION{{ strategies.length === 1 ? '' : 'S' }}</span>
+      </div>
+      <label class="field-token">LOCAL ADMIN TOKEN<span>stored in this tab only</span>
+        <input v-model="adminToken" type="password" autocomplete="off" placeholder="TRADINGOS_LOCAL_ADMIN_TOKEN">
+      </label>
+      <label class="field-token">MARKET<span>symbol stored by the broker worker</span>
+        <input v-model="symbol" type="text" placeholder="EURUSD">
+      </label>
+      <div class="backtest-inline">
+        <label class="field-token">TIMEFRAME (S)<input v-model.number="timeframeSeconds" type="number" min="1" max="86400"></label>
+        <label class="field-token">CENSOR GAP (S)<input v-model.number="censorGapSeconds" type="number" min="1" max="86400"></label>
+      </div>
+      <div class="backtest-inline">
+        <label class="field-token">SOURCE
+          <select v-model="source">
+            <option value="strategy">Stored strategy version</option>
+            <option value="custom">Custom parameters (no version)</option>
+          </select>
+        </label>
+        <template v-if="source === 'strategy'">
+          <label class="field-token">STRATEGY VERSION
+            <select v-model="strategyId" :disabled="strategiesLoading || !strategies.length">
+              <option v-if="!strategies.length" :value="null">{{ strategiesLoading ? 'READING…' : 'none stored yet' }}</option>
+              <option v-for="strategy in strategies" :key="strategy.id" :value="strategy.id">#{{ strategy.id }} {{ strategy.strategy_key }} v{{ strategy.version }} ({{ strategy.status }})</option>
+            </select>
+          </label>
+        </template>
+        <template v-else>
+          <label class="field-token">FAST / SLOW EMA
+            <div class="backtest-pair">
+              <input v-model.number="customFast" type="number" min="1" max="200">
+              <input v-model.number="customSlow" type="number" min="2" max="400">
+            </div>
+          </label>
+        </template>
+      </div>
+      <p v-if="runError" class="setup-error">{{ runError }}</p>
+      <button class="setup-action" type="button" :disabled="running" @click="runBacktest()">{{ running ? 'WALKING FORWARD…' : 'RUN BACKTEST' }}</button>
+    </section>
+
+    <section v-if="result" class="kpi-strip" aria-label="Backtest headline figures">
+      <div class="kpi-cell"><span class="mono micro">TRADES</span><strong class="kpi-value kpi-value--neutral">{{ result.metrics.trades }}</strong></div>
+      <div class="kpi-cell"><span class="mono micro">WIN RATE</span><strong class="kpi-value kpi-value--neutral">{{ percent(result.metrics.win_rate) }}</strong></div>
+      <div class="kpi-cell"><span class="mono micro">TOTAL RETURN</span><strong :class="['kpi-value', result.metrics.total_return > 0 ? 'kpi-value--pos' : result.metrics.total_return < 0 ? 'kpi-value--neg' : 'kpi-value--neutral']">{{ moneyish(result.metrics.total_return) }}</strong></div>
+      <div class="kpi-cell"><span class="mono micro">MAX DRAWDOWN</span><strong class="kpi-value kpi-value--neg">{{ percent(result.metrics.max_drawdown) }}</strong></div>
+      <div class="kpi-cell"><span class="mono micro">AVG TRADE</span><strong :class="['kpi-value', result.metrics.average_trade_return > 0 ? 'kpi-value--pos' : 'kpi-value--neg']">{{ moneyish(result.metrics.average_trade_return) }}</strong></div>
+    </section>
+
+    <section v-if="result" class="setup-card">
+      <div class="setup-heading">
+        <div>
+          <p class="mono micro">MULTIPLICATIVE EQUITY · START 1.00</p>
+          <h2>Walk-forward equity curve</h2>
+        </div>
+        <span class="panel-index">EMA {{ result.params.fast_window }}/{{ result.params.slow_window }}</span>
+      </div>
+      <div class="curve-stage">
+        <svg v-if="curveGeometry" class="curve-svg" :viewBox="`0 0 ${CurveGeometryWidth} ${CurveGeometryHeight}`" preserveAspectRatio="none" role="img" aria-label="Backtest equity curve">
+          <line :x1="10" :y1="curveGeometry.baseline" :x2="CurveGeometryWidth - 10" :y2="curveGeometry.baseline" stroke="rgba(235,232,223,.18)" stroke-dasharray="3 5" stroke-width="1" />
+          <path :d="curveGeometry.line" fill="none" :stroke="result.metrics.total_return >= 0 ? '#83bbb0' : '#cf6a5c'" stroke-width="1.6" />
+        </svg>
+        <div v-else class="curve-empty">
+          <span class="empty-glyph">∿</span>
+          <p>This parameter set produced no trades on the stored window.</p>
+        </div>
+      </div>
+      <div v-if="result.trades.length" class="group-table">
+        <div class="group-row group-row--recent group-row--head"><span>#</span><span>DECIDED</span><span>SIGNAL</span><span>ENTRY</span><span>EXIT</span><span>RETURN</span></div>
+        <div v-for="trade in [...result.trades].reverse().slice(0, 12)" :key="trade.index" class="group-row group-row--recent">
+          <span class="mono">{{ trade.index }}</span>
+          <span class="mono">{{ new Date(trade.decision_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }}</span>
+          <span :class="['strategy-chip', trade.signal === 'CALL' ? 'strategy-chip--validated' : 'strategy-chip--retired']">{{ trade.signal }}</span>
+          <span class="mono">{{ trade.entry_close.toFixed(5) }}</span>
+          <span class="mono">{{ trade.exit_close.toFixed(5) }}</span>
+          <span class="mono" :class="trade.trade_return >= 0 ? 'pos' : 'neg'">{{ moneyish(trade.trade_return) }}</span>
+        </div>
+      </div>
+      <p class="quiet-note desk-pad">Showing the {{ Math.min(12, result.trades.length) }} most recent of {{ result.trades.length }} simulated trades. Entry/exit are closes one censor gap apart; nothing here touched a broker.</p>
+    </section>
+
+    <section class="setup-card setup-card--form">
+      <div class="setup-heading">
+        <div>
+          <p class="mono micro">PARAMETER SURFACE</p>
+          <h2>Fast × slow sweep</h2>
+        </div>
+        <div class="backtest-lens">
+          <button v-for="lens in sweepLens" :key="lens.key" type="button" :class="['focus-chip', { 'focus-chip--active': sweepFocus === lens.key }]" @click="sweepFocus = lens.key">{{ lens.label }}</button>
+        </div>
+      </div>
+      <div class="backtest-inline">
+        <label class="field-token">FAST WINDOWS<span>comma separated</span><input v-model="sweepFast" type="text"></label>
+        <label class="field-token">SLOW WINDOWS<span>comma separated</span><input v-model="sweepSlow" type="text"></label>
+      </div>
+      <p v-if="sweepError" class="setup-error">{{ sweepError }}</p>
+      <button class="setup-action setup-action--quiet" type="button" :disabled="sweepRunning" @click="runSweep">{{ sweepRunning ? 'SWEEPING…' : 'RUN SWEEP' }}</button>
+      <div v-if="sweep?.cells?.length" class="backtest-grid-wrap desk-pad">
+        <div class="backtest-grid" :style="{ gridTemplateColumns: `48px repeat(${sweepGrid.slowValues.length}, minmax(64px, 1fr))` }">
+          <span></span>
+          <span v-for="slow in sweepGrid.slowValues" :key="`head-${slow}`" class="mono micro backtest-grid-head">SLOW {{ slow }}</span>
+          <template v-for="fast in sweepGrid.fastValues" :key="`row-${fast}`">
+            <span class="mono micro backtest-grid-head">FAST {{ fast }}</span>
+            <button
+              v-for="slow in sweepGrid.slowValues"
+              :key="`${fast}:${slow}`"
+              type="button"
+              class="backtest-cell mono"
+              :style="cellStyle(sweepGrid.byPair.get(`${fast}:${slow}`) ?? { metrics: null, error: null })"
+              :disabled="running"
+              @click="runBacktest({ fast, slow })"
+            >
+              <template v-if="sweepGrid.byPair.get(`${fast}:${slow}`)?.metrics">
+                {{ sweepFocus === 'max_drawdown' ? percent(sweepGrid.byPair.get(`${fast}:${slow}`)?.metrics?.max_drawdown) : sweepFocus === 'win_rate' ? percent(sweepGrid.byPair.get(`${fast}:${slow}`)?.metrics?.win_rate) : moneyish(sweepGrid.byPair.get(`${fast}:${slow}`)?.metrics?.total_return ?? 0) }}
+              </template>
+              <template v-else>—</template>
+            </button>
+          </template>
+        </div>
+        <p class="quiet-note">Tap a cell to load those windows into the runner above. Inverted pairs and candle-starved cells report an em dash. Green deepens with the lens value; red marks negative ones (max-drawdown lens inverts so deeper green is safer).</p>
+      </div>
+    </section>
+  </div>
+</template>
+
+<style scoped>
+.backtest-inline { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin: 0 26px; }
+.backtest-inline .field-token { margin: 0; display: grid; gap: 8px; }
+.field-token { display: grid; gap: 8px; margin: 0 26px; color: var(--paper); font-family: 'DM Mono', monospace; font-size: 10px; letter-spacing: .06em; }
+.field-token span { color: var(--quiet); }
+.field-token input, .field-token select { width: 100%; border: 1px solid var(--line); border-radius: 0; outline: 0; padding: 13px 14px; background: rgba(8, 10, 10, .75); color: var(--paper); font: 12px 'DM Mono', monospace; }
+.field-token input:focus, .field-token select:focus { border-color: var(--teal); }
+.backtest-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.backtest-lens { display: flex; gap: 8px; flex-wrap: wrap; }
+.backtest-grid-wrap { display: grid; gap: 14px; margin: 0 26px 26px; }
+.backtest-grid { display: grid; gap: 6px; align-items: stretch; }
+.backtest-grid-head { color: var(--quiet); align-self: center; }
+.backtest-cell { border: 1px solid var(--line); padding: 12px 6px; color: var(--paper); font-size: 10px; letter-spacing: .02em; transition: outline .12s ease; }
+.backtest-cell:hover:not(:disabled) { outline: 1px solid var(--brass); }
+</style>

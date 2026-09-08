@@ -14,16 +14,17 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.database import Base, SessionLocal, engine, get_session
-from app.models import AIResearchRun, AccountConfig, AccountSnapshot, AuditEvent, Candle, EncryptedBrokerCredential, FeatureSnapshot, LoopRun, MarketAsset, OrderIntent, OrderRecord, PositionSnapshot, ReconciliationRun, RiskPolicy, StrategyEvaluation, StrategyVersion, SystemState, WatchlistItem
-from app.schemas import AccountStateResponse, AuditEventResponse, AuthLoginInput, AuthLoginResponse, AuthSessionResponse, BrokerConnectionResponse, BrokerCredentialInput, CandleResponse, FeatureResponse, HealthResponse, LoopRunResponse, LoopStatusResponse, MarketAssetResponse, MarketChartResponse, OrderIntentInput, OrderIntentResponse, OrderResponse, PositionResponse, ReconciliationResponse, ResearchRunResponse, RiskPolicyResponse, StrategyComparisonResponse, StrategyCreateInput, StrategyEvaluationInput, StrategyEvaluationResponse, StrategyResponse, StrategyStatusUpdateInput, TradeAnalyticsResponse, TradeResponse, WatchlistItemResponse, WatchlistUpdate
+from app.models import AIResearchRun, AccountConfig, AccountSnapshot, AuditEvent, Candle, EncryptedBrokerCredential, FeatureSnapshot, LoopRun, MarketAsset, OrderIntent, OrderRecord, PositionSnapshot, ReconciliationRun, RiskPolicy, StrategyEvaluation, StrategyVersion, SystemState, TradeOutcome, TwoFactorSecret, WatchlistItem
+from app.schemas import AccountStateResponse, AuditEventResponse, AuthLoginInput, AuthLoginResponse, AuthSessionResponse, BacktestRunInput, BacktestRunResponse, BacktestSweepInput, BacktestSweepResponse, BrokerConnectionResponse, BrokerCredentialInput, CandleResponse, FeatureResponse, HealthResponse, LoopRunResponse, LoopStatusResponse, MarketAssetResponse, MarketChartResponse, OrderIntentInput, OrderIntentResponse, OrderResponse, PositionResponse, ReconciliationResponse, ResearchRunResponse, RiskPolicyResponse, StrategyComparisonResponse, StrategyCreateInput, StrategyEvaluationInput, StrategyEvaluationResponse, StrategyResponse, StrategyStatusUpdateInput, TotpProvisionResponse, TotpStatusResponse, TradeAnalyticsResponse, TradeResponse, WatchlistItemResponse, WatchlistUpdate
 from app.services.analytics import strategy_comparison, trade_analytics
-from app.services.auth import SESSION_COOKIE, LoginGate, SessionConfigurationError, SessionManager, credential_ok
+from app.services.auth import SESSION_COOKIE, LoginGate, SessionConfigurationError, SessionManager, credential_ok, generate_totp_secret, otpauth_uri, totp_verify
+from app.services.backtest import run_backtest, run_sweep
 from app.services.broker import IQAirBrokerAdapter
 from app.services.credentials import BrokerCredentials, CredentialConfigurationError, CredentialVault
 from app.services.events import event_bus, publish_event
 from app.services.market_view import market_chart
 from app.services.worker import BrokerWorker
-from app.services.strategy import evaluate_strategy, persist_features
+from app.services.strategy import evaluate_strategy, persist_features, utc_now
 from app.services.research import ResearchBudgetExceeded, ResearchService
 from app.services.execution import ExecutionService
 from app.services.loop import LoopEngine
@@ -166,6 +167,27 @@ def login(payload: AuthLoginInput, request: Request, response: Response) -> Auth
             audit_session.add(AuditEvent(event_type="AUTH_LOGIN_FAILED", severity="WARNING", message="A sign-in attempt presented an invalid admin token.", payload={"source": ip}))
             audit_session.commit()
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Admin token is invalid.")
+    if settings.totp_required:
+        # Fail-closed second factor for the interactive exchange: no provisioned
+        # secret, no session. Header/bearer admin-token access is unchanged.
+        with SessionLocal() as totp_session:
+            totp_row = totp_session.scalar(select(TwoFactorSecret).limit(1))
+            totp_enabled = bool(totp_row and totp_row.enabled)
+        if not totp_enabled:
+            with SessionLocal() as audit_session:
+                audit_session.add(AuditEvent(event_type="AUTH_TOTP_UNPROVISIONED", severity="ERROR", message="A sign-in reached the required two-factor gate with no provisioned authenticator secret.", payload={"source": ip}))
+                audit_session.commit()
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Two-factor authentication is required but no authenticator secret is provisioned; provision one with the admin token via POST /api/v1/auth/totp/provision.")
+        try:
+            totp_secret = _vault().decrypt(totp_row.secret_ciphertext)
+        except CredentialConfigurationError as exc:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+        if not totp_verify(totp_secret, payload.totp_code):
+            login_gate.record_failure(ip)
+            with SessionLocal() as audit_session:
+                audit_session.add(AuditEvent(event_type="AUTH_LOGIN_FAILED", severity="WARNING", message="A sign-in attempt presented an invalid verification code.", payload={"source": ip, "reason": "totp_code_invalid"}))
+                audit_session.commit()
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="The verification code is invalid or expired.")
     login_gate.record_success(ip)
     try:
         manager = SessionManager(settings)
@@ -200,7 +222,9 @@ def logout(request: Request, response: Response) -> dict:
 def auth_session(request: Request) -> AuthSessionResponse:
     """Bootstrap probe for the UI: is remote access on, and is this browser in?"""
     if not settings.remote_access_enabled:
-        return AuthSessionResponse(authenticated=False, remote_access=False)
+        # The login exchange demands a TOTP code whenever totp_required is set,
+        # gate or no gate, so the UI must see the flag in both modes.
+        return AuthSessionResponse(authenticated=False, remote_access=False, totp_required=settings.totp_required)
     scope_headers = {key.decode().lower(): value.decode() for key, value in request.scope.get("headers", [])}
     authorized = credential_ok(settings=settings, headers=scope_headers, cookies=dict(request.cookies))
     expires_at = None
@@ -211,7 +235,43 @@ def auth_session(request: Request) -> AuthSessionResponse:
             from datetime import UTC as _UTC, datetime as _datetime
 
             expires_at = _datetime.fromtimestamp(int(parts[1]), tz=_UTC)
-    return AuthSessionResponse(authenticated=authorized, remote_access=True, expires_at=expires_at)
+    return AuthSessionResponse(authenticated=authorized, remote_access=True, expires_at=expires_at, totp_required=settings.totp_required)
+
+
+@app.post(f"{settings.api_prefix}/auth/totp/provision", response_model=TotpProvisionResponse, dependencies=[Depends(_require_local_admin)], tags=["auth"])
+def provision_totp(session: Session = Depends(get_session)) -> TotpProvisionResponse:
+    """Create or rotate the TOTP shared secret. The plaintext is returned exactly once."""
+    vault = _vault()
+    secret = generate_totp_secret()
+    row = session.scalar(select(TwoFactorSecret).limit(1))
+    if row is None:
+        row = TwoFactorSecret(secret_ciphertext=vault.encrypt(secret), enabled=True)
+        session.add(row)
+    else:
+        row.secret_ciphertext = vault.encrypt(secret)
+        row.enabled = True
+        row.rotated_at = utc_now()
+    session.add(AuditEvent(event_type="AUTH_TOTP_PROVISIONED", severity="WARNING", message="A TOTP authenticator secret was provisioned for the login gate; the plaintext was shown once and never stored.", payload={}))
+    session.commit()
+    return TotpProvisionResponse(secret=secret, otpauth_uri=otpauth_uri(secret))
+
+
+@app.get(f"{settings.api_prefix}/auth/totp/status", response_model=TotpStatusResponse, dependencies=[Depends(_require_local_admin)], tags=["auth"])
+def totp_status(session: Session = Depends(get_session)) -> TotpStatusResponse:
+    row = session.scalar(select(TwoFactorSecret).limit(1))
+    return TotpStatusResponse(required=settings.totp_required, provisioned=bool(row and row.enabled))
+
+
+@app.post(f"{settings.api_prefix}/auth/totp/disable", response_model=TotpStatusResponse, dependencies=[Depends(_require_local_admin)], tags=["auth"])
+def disable_totp(session: Session = Depends(get_session)) -> TotpStatusResponse:
+    """Disable the provisioned secret. A required-but-disabled gate fails closed."""
+    row = session.scalar(select(TwoFactorSecret).limit(1))
+    if row is not None and row.enabled:
+        row.enabled = False
+        row.rotated_at = utc_now()
+        session.add(AuditEvent(event_type="AUTH_TOTP_DISABLED", severity="WARNING", message="The TOTP authenticator secret was disabled; a required two-factor gate now fails closed until a new secret is provisioned.", payload={}))
+        session.commit()
+    return TotpStatusResponse(required=settings.totp_required, provisioned=False)
 
 
 @app.get(f"{settings.api_prefix}/health", response_model=HealthResponse, tags=["system"])
@@ -290,6 +350,33 @@ def validate_strategy(strategy_id: int, payload: StrategyEvaluationInput, sessio
     session.commit()
     session.refresh(evaluation)
     return evaluation
+
+
+@app.post(f"{settings.api_prefix}/backtest/run", response_model=BacktestRunResponse, dependencies=[Depends(_require_local_admin)], tags=["backtest"])
+def run_backtest_view(payload: BacktestRunInput, session: Session = Depends(get_session)) -> dict:
+    """Read-only walk-forward preview over stored candles; nothing is persisted."""
+    if payload.strategy_version_id is not None:
+        strategy = session.get(StrategyVersion, payload.strategy_version_id)
+        if strategy is None:
+            raise HTTPException(status_code=404, detail="Strategy version does not exist.")
+        definition = dict(strategy.definition)
+    else:
+        definition = {"kind": "ema_cross", "fast_window": 12, "slow_window": 26, "volatility_window": 20, "max_drawdown": 0.05, **(payload.definition or {})}
+        if definition.get("kind") != "ema_cross" or int(definition["fast_window"]) >= int(definition["slow_window"]):
+            raise HTTPException(status_code=422, detail="Only valid EMA-cross parameter sets with fast_window < slow_window are accepted.")
+    try:
+        return run_backtest(session, definition, payload.symbol, payload.timeframe_seconds, payload.censor_gap_seconds)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post(f"{settings.api_prefix}/backtest/sweep", response_model=BacktestSweepResponse, dependencies=[Depends(_require_local_admin)], tags=["backtest"])
+def run_backtest_sweep_view(payload: BacktestSweepInput, session: Session = Depends(get_session)) -> dict:
+    """Bounded fast/slow EMA grid over one candle set; invalid pairs are reported, not fatal."""
+    try:
+        return run_sweep(session, payload.symbol, payload.timeframe_seconds, payload.censor_gap_seconds, payload.fast_windows, payload.slow_windows, payload.volatility_window)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @app.get(f"{settings.api_prefix}/features", response_model=list[FeatureResponse], tags=["research"])

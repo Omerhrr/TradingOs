@@ -24,6 +24,7 @@ import base64
 import hashlib
 import hmac
 import secrets
+import struct
 import threading
 import time
 from datetime import UTC, datetime, timedelta
@@ -34,6 +35,13 @@ SESSION_COOKIE = "tradingos_session"
 _CLOCK_SKEW_SECONDS = 30
 _LOGIN_WINDOW_SECONDS = 900
 _LOGIN_MAX_FAILURES = 5
+
+# RFC 6238 defaults: SHA-1 HMAC over a 30-second step, 6 decimal digits.
+# These are the values every mainstream authenticator app provisions by default.
+_TOTP_PERIOD_SECONDS = 30
+_TOTP_DIGITS = 6
+_TOTP_DRIFT_STEPS = 1
+_TOTP_SECRET_BYTES = 20
 
 
 class SessionConfigurationError(RuntimeError):
@@ -169,3 +177,62 @@ def credential_ok(
             return True
     cookie_token = (cookies or {}).get(SESSION_COOKIE)
     return bool(cookie_token and SessionManager(settings).verify(cookie_token))
+
+
+# --------------------------------------------------------------------- TOTP
+#
+# Time-based one-time codes harden the interactive sign-in exchange when the
+# control plane is reachable beyond localhost. The shared admin token stays
+# the machine credential (header/bearer paths are unchanged); the TOTP code is
+# demanded only at POST /auth/login, where a human is typing a secret.
+# The per-IP lockout covers TOTP failures exactly like token failures.
+
+
+def generate_totp_secret() -> str:
+    """A fresh RFC 4648 base32 secret (160 bits, no padding)."""
+    raw = secrets.token_bytes(_TOTP_SECRET_BYTES)
+    return base64.b32encode(raw).decode("ascii").rstrip("=")
+
+
+def _totp_at(secret: str, counter: int, digits: int = _TOTP_DIGITS) -> str:
+    key = base64.b32decode(secret + "=" * (-len(secret) % 8), casefold=True)
+    digest = hmac.new(key, struct.pack(">Q", counter), hashlib.sha1).digest()
+    offset = digest[-1] & 0x0F
+    binary = (
+        (digest[offset] & 0x7F) << 24
+        | digest[offset + 1] << 16
+        | digest[offset + 2] << 8
+        | digest[offset + 3]
+    )
+    return str(binary % (10 ** digits)).zfill(digits)
+
+
+def totp_code(secret: str, for_time: float | None = None) -> str:
+    """The code a correctly configured authenticator app would show right now."""
+    when = time.time() if for_time is None else for_time
+    return _totp_at(secret, int(when // _TOTP_PERIOD_SECONDS))
+
+
+def totp_verify(secret: str, code: str | None, drift_steps: int = _TOTP_DRIFT_STEPS, now: float | None = None) -> bool:
+    """Constant-time check across the configured clock-drift window."""
+    if not code:
+        return False
+    candidate = code.strip()
+    if not candidate.isdigit() or len(candidate) != _TOTP_DIGITS:
+        return False
+    when = time.time() if now is None else now
+    current = int(when // _TOTP_PERIOD_SECONDS)
+    for step in range(-drift_steps, drift_steps + 1):
+        if hmac.compare_digest(_totp_at(secret, current + step), candidate):
+            return True
+    return False
+
+
+def otpauth_uri(secret: str, label: str = "TradingOS admin", issuer: str = "TradingOS") -> str:
+    """The provisioning URI authenticator apps accept from manual entry."""
+    from urllib.parse import quote
+
+    return (
+        f"otpauth://totp/{quote(label)}?secret={secret}&issuer={quote(issuer)}"
+        f"&algorithm=SHA1&digits={_TOTP_DIGITS}&period={_TOTP_PERIOD_SECONDS}"
+    )

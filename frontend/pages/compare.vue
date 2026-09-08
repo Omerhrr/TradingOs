@@ -91,6 +91,40 @@ function evaluationNote(row: StrategyComparisonRow): string {
   return `${evaluation.accepted ? 'accepted' : 'rejected'} · ${parts.join(', ') || 'no metrics'}`
 }
 
+const OVERLAY_WIDTH = 600
+const OVERLAY_HEIGHT = 220
+const OVERLAY_COLORS = ['#83bbb0', '#c79a4a', '#9a8fc9', '#cf6a5c', '#7fa3c9', '#c9b45f']
+
+const overlayCurves = computed(() => {
+  const curves = comparison.value
+    .filter(row => row.equity_curve.length >= 2)
+    .map((row, order) => ({ row, points: row.equity_curve, color: OVERLAY_COLORS[order % OVERLAY_COLORS.length] }))
+  if (curves.length < 1) return null
+  const pad = 10
+  const allEquity = curves.flatMap(curve => curve.points.map(point => point.equity))
+  const min = Math.min(0, ...allEquity)
+  const max = Math.max(0, ...allEquity)
+  const span = max - min || 1
+  const x = (i: number, total: number) => pad + (total <= 1 ? 0 : (i / (total - 1)) * (OVERLAY_WIDTH - 2 * pad))
+  const y = (v: number) => OVERLAY_HEIGHT - pad - ((v - min) / span) * (OVERLAY_HEIGHT - 2 * pad)
+  return {
+    baseline: y(0).toFixed(1),
+    curves: curves.map(curve => ({
+      id: curve.row.strategy_version_id,
+      label: `${curve.row.strategy_key} v${curve.row.version}`,
+      color: curve.color,
+      path: curve.points.map((point, i) => `${i === 0 ? 'M' : 'L'}${x(i, curve.points.length).toFixed(1)},${y(point.equity).toFixed(1)}`).join(' '),
+    })),
+  }
+})
+
+function overlaySummary(row: StrategyComparisonRow): string {
+  const curve = row.equity_curve
+  const last = curve[curve.length - 1]
+  if (!curve.length || !last) return 'no settled trades'
+  return money(last.equity)
+}
+
 onMounted(loadComparison)
 
 // Live freshness: a settlement or a completed tick can reorder the table.
@@ -139,6 +173,29 @@ useHead({ title: 'TradingOS · Strategy Comparison' })
           @click="focus = option.key"
         >{{ option.label }}</button>
         <span v-if="focus === 'max_drawdown'" class="mono micro compare-focus-note">LOWER IS BETTER</span>
+      </div>
+    </section>
+
+    <section v-if="overlayCurves" class="setup-card compare-overlay-card">
+      <div class="setup-heading">
+        <div>
+          <p class="mono micro">PER-STRATEGY CUMULATIVE PNL · START $0.00</p>
+          <h2>Equity overlay</h2>
+        </div>
+        <span class="panel-index">{{ ranked.filter(row => row.equity_curve.length >= 2).length }} CURVES</span>
+      </div>
+      <div class="curve-stage">
+        <svg class="curve-svg" :viewBox="`0 0 ${OVERLAY_WIDTH} ${OVERLAY_HEIGHT}`" preserveAspectRatio="none" role="img" aria-label="Per-strategy equity overlay">
+          <line :x1="10" :y1="overlayCurves.baseline" :x2="OVERLAY_WIDTH - 10" :y2="overlayCurves.baseline" stroke="rgba(235,232,223,.18)" stroke-dasharray="3 5" stroke-width="1" />
+          <path v-for="curve in overlayCurves.curves" :key="curve.id" :d="curve.path" fill="none" :stroke="curve.color" stroke-width="1.6" />
+        </svg>
+      </div>
+      <div class="compare-overlay-legend desk-pad">
+        <span v-for="curve in overlayCurves.curves" :key="curve.id" class="compare-legend-item">
+          <span class="compare-legend-swatch" :style="{ background: curve.color }"></span>
+          <span class="mono micro">{{ curve.label }}</span>
+          <span class="mono micro compare-legend-value">{{ overlaySummary(ranked.find(row => row.strategy_version_id === curve.id)!) }}</span>
+        </span>
       </div>
     </section>
 
@@ -210,3 +267,10 @@ useHead({ title: 'TradingOS · Strategy Comparison' })
     </section>
   </div>
 </template>
+
+<style scoped>
+.compare-overlay-legend { display: flex; flex-wrap: wrap; gap: 14px 22px; }
+.compare-legend-item { display: inline-flex; align-items: center; gap: 8px; }
+.compare-legend-swatch { width: 14px; height: 3px; }
+.compare-legend-value { color: var(--quiet); }
+</style>

@@ -7,7 +7,7 @@
 - [x] Integrate aircore/airpy through bounded workflows, typed research outputs, model budgets, and MindGraph-based context compression.
 - [x] Implement an idempotent order-intent ledger, deterministic risk authorization, and a practice-only execution adapter.
 - [x] Extend the Nuxt control plane for configuration, research runs, validation reports, execution state, risk events, and audit records.
-- [ ] Add contract, unit, integration, restart, and failure-injection tests across the full service boundary.
+- [x] Add contract, unit, integration, restart, and failure-injection tests across the full service boundary.
 - [x] Document operations, credential handling, data retention, live-mode gates, and the remaining broker-hardening requirements.
 - [x] Package local startup, shutdown, configuration, and health-check scripts for the user’s always-on computer.
 - [x] Provide a deployment-neutral configuration contract and a tested migration guide for moving the same services to a VDS.

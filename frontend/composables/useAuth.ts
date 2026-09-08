@@ -25,13 +25,13 @@ export function useAuth() {
     return session.value
   }
 
-  async function login(token: string): Promise<AuthLogin> {
+  async function login(token: string, totpCode?: string): Promise<AuthLogin> {
     const result = await $fetch<AuthLogin>(`${apiBaseUrl}/auth/login`, {
       method: 'POST',
-      body: { token },
+      body: { token, ...(totpCode ? { totp_code: totpCode } : {}) },
       credentials: 'include',
     })
-    session.value = { authenticated: true, remote_access: true, expires_at: result.expires_at }
+    session.value = { authenticated: true, remote_access: true, expires_at: result.expires_at, totp_required: session.value?.totp_required ?? false }
     return result
   }
 

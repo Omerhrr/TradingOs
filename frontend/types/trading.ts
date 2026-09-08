@@ -316,6 +316,7 @@ export interface StrategyComparisonRow {
   live: ComparisonLive
   activity: ComparisonActivity
   evaluation: ComparisonEvaluation
+  equity_curve: Array<{ index: number; settled_at: string; equity: number }>
 }
 
 export interface StrategyComparison {
@@ -327,10 +328,77 @@ export interface AuthSession {
   authenticated: boolean
   remote_access: boolean
   expires_at: string | null
+  totp_required?: boolean
 }
 
 export interface AuthLogin {
   session_token: string
   expires_at: string
   cookie_name: string
+}
+
+export interface TotpProvision {
+  secret: string
+  otpauth_uri: string
+}
+
+export interface TotpStatus {
+  required: boolean
+  provisioned: boolean
+}
+
+export interface BacktestMetrics {
+  trades: number
+  wins: number
+  win_rate: number
+  total_return: number
+  max_drawdown: number
+  average_trade_return: number
+  method: string
+  censor_gap_seconds: number
+}
+
+export interface BacktestEquityPoint {
+  index: number
+  open_time: string
+  trade_return: number | null
+  equity: number
+}
+
+export interface BacktestTradeRow {
+  index: number
+  decision_time: string
+  entry_time: string
+  exit_time: string
+  signal: 'CALL' | 'PUT' | string
+  entry_close: number
+  exit_close: number
+  trade_return: number
+}
+
+export interface BacktestRun {
+  symbol: string
+  timeframe_seconds: number
+  censor_gap_seconds: number
+  params: { fast_window: number; slow_window: number; volatility_window: number; max_drawdown: number | null }
+  metrics: BacktestMetrics
+  equity_curve: BacktestEquityPoint[]
+  trades: BacktestTradeRow[]
+  generated_at: string
+}
+
+export interface BacktestSweepCell {
+  fast_window: number
+  slow_window: number
+  metrics: BacktestMetrics | null
+  error: string | null
+}
+
+export interface BacktestSweep {
+  symbol: string
+  timeframe_seconds: number
+  censor_gap_seconds: number
+  volatility_window: number
+  cells: BacktestSweepCell[]
+  generated_at: string
 }

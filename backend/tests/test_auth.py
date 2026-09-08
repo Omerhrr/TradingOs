@@ -150,7 +150,7 @@ def test_session_cookie_satisfies_gate_and_admin_endpoints(remote_on) -> None:
         paused = client.post("/api/v1/system/pause")
         assert paused.status_code == 200, "a signed-in operator drives admin controls without re-pasting the token"
         session_view = client.get("/api/v1/auth/session").json()
-        assert session_view == {"authenticated": True, "remote_access": True, "expires_at": session_view["expires_at"]}
+        assert session_view == {"authenticated": True, "remote_access": True, "expires_at": session_view["expires_at"], "totp_required": False}
         assert session_view["expires_at"] is not None
 
 

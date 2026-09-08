@@ -12,3 +12,4 @@ frontend/.nuxt/
 frontend/.output/
 frontend/node_modules/
 frontend/.env
+.venv/

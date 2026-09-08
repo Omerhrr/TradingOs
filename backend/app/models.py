@@ -305,3 +305,20 @@ class AIResearchRun(Base):
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class TwoFactorSecret(Base):
+    """Encrypted TOTP shared secret for the interactive login gate.
+
+    Single-row table by convention (the control plane has exactly one admin).
+    The secret is stored only through the same Fernet vault as broker
+    credentials; plaintext never touches the database, logs, or audit ledger.
+    """
+
+    __tablename__ = "two_factor_secrets"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    secret_ciphertext: Mapped[str] = mapped_column(Text)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    rotated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

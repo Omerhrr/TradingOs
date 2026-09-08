@@ -27,6 +27,20 @@ os.environ["TRADINGOS_CREDENTIAL_ENCRYPTION_KEY"] = Fernet.generate_key().decode
 import pytest  # noqa: E402
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _create_schema_up_front():
+    """The schema exists before the very first test, not only after its teardown.
+
+    Without this, a fresh database plus a first test that never boots the
+    TestClient (whose lifespan would create tables) fails on a missing table
+    in teardown — pure-crypto tests with DB-cleaning fixtures hit exactly that.
+    """
+    from app.database import Base, engine
+
+    Base.metadata.create_all(bind=engine)
+    yield
+
+
 @pytest.fixture(autouse=True)
 def _restore_pristine_world():
     """Every test ends with the shared database exactly as app seeding leaves it.
@@ -58,6 +72,7 @@ def _restore_pristine_world():
         StrategyVersion,
         SystemState,
         TradeOutcome,
+        TwoFactorSecret,
     )
 
     Base.metadata.create_all(bind=engine)
@@ -65,7 +80,7 @@ def _restore_pristine_world():
         for model in (OrderIntent, OrderRecord, PositionSnapshot, TradeOutcome,
                       LearningEpisode, AccountSnapshot, MarketAsset, FeatureSnapshot,
                       Candle, ReconciliationRun, LoopRun, StrategyEvaluation, StrategyVersion, RiskPolicy,
-                      AccountConfig, EncryptedBrokerCredential, AuditEvent):
+                      AccountConfig, EncryptedBrokerCredential, TwoFactorSecret, AuditEvent):
             session.query(model).delete()
         if session.scalar(select(AccountConfig.id).limit(1)) is None:
             session.add(AccountConfig(account_label="Primary account", mode="PRACTICE",
