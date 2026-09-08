@@ -159,6 +159,24 @@ class ReconciliationResponse(BaseModel):
     finished_at: datetime | None
 
 
+class LoopRunResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    state: str
+    error_message: str | None
+    summary: dict
+    started_at: datetime
+    finished_at: datetime | None
+
+
+class LoopStatusResponse(BaseModel):
+    loop_enabled: bool
+    practice_execution_enabled: bool
+    broker_connection: str
+    system_state: str | None
+    last_run: LoopRunResponse | None
+
+
 class StrategyCreateInput(BaseModel):
     strategy_key: str = Field(min_length=3, max_length=100, pattern=r"^[a-z0-9_-]+$")
     version: str = Field(min_length=1, max_length=32)

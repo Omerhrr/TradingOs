@@ -15,10 +15,11 @@ from app.services.worker import BrokerWorker
 class LocalRuntime:
     """Maintains one worker thread; any unexpected broker error halts new exposure."""
 
-    def __init__(self, settings: Settings, session_factory: sessionmaker, worker: BrokerWorker) -> None:
+    def __init__(self, settings: Settings, session_factory: sessionmaker, worker: BrokerWorker, loop=None) -> None:
         self.settings = settings
         self.session_factory = session_factory
         self.worker = worker
+        self.loop = loop
         self._stop = threading.Event()
         self._halted = threading.Event()
         self._thread: threading.Thread | None = None
@@ -64,7 +65,12 @@ class LocalRuntime:
                         vault = CredentialVault(self.settings.credential_encryption_key)
                         self.worker.connect_practice(session, BrokerCredentials(email=vault.decrypt(credential.email_ciphertext), password=vault.decrypt(credential.password_ciphertext)))
                     else:
-                        self.worker.reconcile(session)
+                        if self.loop is not None and self.settings.loop_enabled:
+                            # The loop reconciles internally before signalling,
+                            # so one tick is the full observe -> decide -> act pass.
+                            self.loop.tick(session)
+                        else:
+                            self.worker.reconcile(session)
             except Exception as exc:
                 self._halt(exc)
                 self.worker.disconnect()

@@ -229,6 +229,19 @@ class ReconciliationRun(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class LoopRun(Base):
+    """One pass of the strategy -> intent -> practice-execution loop."""
+
+    __tablename__ = "loop_runs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    state: Mapped[str] = mapped_column(String(24), default="RUNNING")
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    summary: Mapped[dict] = mapped_column(JSON, default=dict)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class StrategyEvaluation(Base):
     __tablename__ = "strategy_evaluations"
 

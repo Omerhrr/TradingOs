@@ -11,20 +11,22 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.database import Base, SessionLocal, engine, get_session
-from app.models import AIResearchRun, AccountConfig, AccountSnapshot, AuditEvent, Candle, EncryptedBrokerCredential, FeatureSnapshot, MarketAsset, OrderIntent, OrderRecord, PositionSnapshot, ReconciliationRun, RiskPolicy, StrategyEvaluation, StrategyVersion, SystemState, WatchlistItem
-from app.schemas import AccountStateResponse, AuditEventResponse, BrokerConnectionResponse, BrokerCredentialInput, CandleResponse, FeatureResponse, HealthResponse, MarketAssetResponse, OrderIntentInput, OrderIntentResponse, OrderResponse, PositionResponse, ReconciliationResponse, ResearchRunResponse, RiskPolicyResponse, StrategyCreateInput, StrategyEvaluationInput, StrategyEvaluationResponse, StrategyResponse, TradeResponse, WatchlistItemResponse, WatchlistUpdate
+from app.models import AIResearchRun, AccountConfig, AccountSnapshot, AuditEvent, Candle, EncryptedBrokerCredential, FeatureSnapshot, LoopRun, MarketAsset, OrderIntent, OrderRecord, PositionSnapshot, ReconciliationRun, RiskPolicy, StrategyEvaluation, StrategyVersion, SystemState, WatchlistItem
+from app.schemas import AccountStateResponse, AuditEventResponse, BrokerConnectionResponse, BrokerCredentialInput, CandleResponse, FeatureResponse, HealthResponse, LoopRunResponse, LoopStatusResponse, MarketAssetResponse, OrderIntentInput, OrderIntentResponse, OrderResponse, PositionResponse, ReconciliationResponse, ResearchRunResponse, RiskPolicyResponse, StrategyCreateInput, StrategyEvaluationInput, StrategyEvaluationResponse, StrategyResponse, TradeResponse, WatchlistItemResponse, WatchlistUpdate
 from app.services.broker import IQAirBrokerAdapter
 from app.services.credentials import BrokerCredentials, CredentialConfigurationError, CredentialVault
 from app.services.worker import BrokerWorker
 from app.services.strategy import evaluate_strategy, persist_features
 from app.services.research import ResearchBudgetExceeded, ResearchService
 from app.services.execution import ExecutionService
+from app.services.loop import LoopEngine
 from app.services.runtime import LocalRuntime
 
 
 settings = get_settings()
 worker = BrokerWorker(IQAirBrokerAdapter(), settings.broker_candle_count)
-runtime = LocalRuntime(settings, SessionLocal, worker)
+loop_engine = LoopEngine(worker, settings)
+runtime = LocalRuntime(settings, SessionLocal, worker, loop_engine)
 
 
 def _seed_control_plane(session: Session) -> None:
@@ -290,6 +292,33 @@ def list_positions(session: Session = Depends(get_session)) -> list[PositionSnap
 @app.get(f"{settings.api_prefix}/reconciliation", response_model=list[ReconciliationResponse], tags=["broker"])
 def list_reconciliation_runs(session: Session = Depends(get_session)) -> list[ReconciliationRun]:
     return list(session.scalars(select(ReconciliationRun).order_by(ReconciliationRun.id.desc()).limit(100)))
+
+
+@app.post(f"{settings.api_prefix}/loop/run", response_model=LoopRunResponse, dependencies=[Depends(_require_local_admin)], tags=["loop"])
+def run_strategy_loop(session: Session = Depends(get_session)) -> LoopRun:
+    """One manual pass of the strategy -> intent -> practice-execution loop."""
+    try:
+        return loop_engine.tick(session)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.get(f"{settings.api_prefix}/loop/status", response_model=LoopStatusResponse, tags=["loop"])
+def loop_status(session: Session = Depends(get_session)) -> LoopStatusResponse:
+    last_run = session.scalar(select(LoopRun).order_by(LoopRun.id.desc()).limit(1))
+    account = session.scalar(select(AccountConfig).limit(1))
+    return LoopStatusResponse(
+        loop_enabled=settings.loop_enabled,
+        practice_execution_enabled=settings.practice_execution_enabled,
+        broker_connection=worker.adapter.health().state,
+        system_state=account.system_state if account else None,
+        last_run=last_run,
+    )
+
+
+@app.get(f"{settings.api_prefix}/loop/runs", response_model=list[LoopRunResponse], tags=["loop"])
+def list_loop_runs(session: Session = Depends(get_session)) -> list[LoopRun]:
+    return list(session.scalars(select(LoopRun).order_by(LoopRun.id.desc()).limit(100)))
 
 
 @app.get(f"{settings.api_prefix}/account/snapshots", tags=["account"])

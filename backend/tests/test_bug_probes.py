@@ -40,27 +40,8 @@ from app.services.execution import ExecutionService
 from app.services.reconciliation import Reconciler
 
 
-@pytest.fixture(autouse=True)
-def _restore_pristine_world():
-    """Leave the shared test database exactly as app seeding would create it,
-    so probe leftovers can never leak into other tests."""
-    yield
-    from app.models import (AccountSnapshot, FeatureSnapshot, LearningEpisode,
-                            MarketAsset, TradeOutcome)
-    with SessionLocal() as session:
-        for model in (OrderIntent, PositionSnapshot, TradeOutcome, LearningEpisode,
-                      AccountSnapshot, MarketAsset, FeatureSnapshot, Candle,
-                      ReconciliationRun, StrategyVersion, RiskPolicy, AccountConfig,
-                      AuditEvent):
-            session.query(model).delete()
-        session.add(AccountConfig(account_label="Primary account", mode="PRACTICE",
-                                  real_execution_enabled=False,
-                                  system_state=SystemState.PAUSED.value))
-        session.add(RiskPolicy())
-        session.add(AuditEvent(event_type="SYSTEM_BOOTSTRAPPED", severity="INFO",
-                               message="Practice-first control plane initialized; broker execution remains disabled.",
-                               payload={"real_execution_enabled": False}))
-        session.commit()
+# The shared pristine-world fixture lives in conftest.py (autouse) so every
+# test module gets identical isolation semantics.
 
 
 # ---------------------------------------------------------------- helpers

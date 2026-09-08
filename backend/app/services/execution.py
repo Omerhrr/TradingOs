@@ -68,11 +68,17 @@ class ExecutionService:
         intent = session.get(OrderIntent, intent_id)
         if intent is None:
             raise ValueError("Order intent does not exist.")
-        if intent.mode != AccountMode.PRACTICE.value or intent.status != OrderStatus.APPROVED.value:
+        if intent.mode != AccountMode.PRACTICE.value:
             raise BrokerError("Only APPROVED PRACTICE intents may be submitted.")
+        # Idempotent double-submit: an already-submitted intent returns its
+        # original order record instead of placing a second broker order.
+        # This check must precede the status guard, otherwise the guard makes
+        # it unreachable (status is SUBMITTED after the first submit).
         existing = session.scalar(select(OrderRecord).where(OrderRecord.order_intent_id == intent.id).limit(1))
         if existing:
             return existing
+        if intent.status != OrderStatus.APPROVED.value:
+            raise BrokerError("Only APPROVED PRACTICE intents may be submitted.")
         duration = int(intent.rationale.get("duration_minutes", 1))
         response = self.broker.submit_practice_option(intent.symbol, intent.side, intent.requested_amount, duration)
         record = OrderRecord(order_intent_id=intent.id, broker_order_id=response["broker_order_id"], status=OrderStatus.SUBMITTED.value, request_payload={"symbol": intent.symbol, "side": intent.side, "amount": intent.requested_amount, "duration_minutes": duration, "mode": "PRACTICE"}, broker_response=response, submitted_at=datetime.now(UTC))

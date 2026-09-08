@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     auto_reconcile_enabled: bool = False
     practice_execution_enabled: bool = False
     real_execution_enabled: bool = False
+    loop_enabled: bool = False
     ai_enabled: bool = False
     ai_model: str = "gpt-5-mini"
     ai_base_url: str | None = None
