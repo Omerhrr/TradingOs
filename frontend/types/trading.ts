@@ -236,3 +236,101 @@ export interface LoopSocketEvent {
   ts: string
   payload: Record<string, unknown>
 }
+
+export interface ChartCandle {
+  open_time: string
+  open: number
+  high: number
+  low: number
+  close: number
+}
+
+export interface ChartMarker {
+  intent_id: number
+  strategy_version_id: number | null
+  symbol: string
+  side: 'CALL' | 'PUT' | string
+  status: string
+  amount: number
+  candle_open_epoch: number
+  candle_open_time: string
+  created_at: string
+}
+
+export interface MarketChart {
+  symbol: string
+  timeframe_seconds: number
+  candles: ChartCandle[]
+  markers: ChartMarker[]
+  generated_at: string
+}
+
+export interface ComparisonParams {
+  fast_window: number | null
+  slow_window: number | null
+  volatility_window: number | null
+  trade_amount: number | null
+  duration_minutes: number | null
+}
+
+export interface ComparisonLive {
+  trades: number
+  wins: number
+  losses: number
+  win_rate: number | null
+  net_pnl: number
+  avg_pnl: number | null
+  profit_factor: number | null
+  max_drawdown: number
+  best_pnl: number | null
+  worst_pnl: number | null
+}
+
+export interface ComparisonActivity {
+  intents: number
+  approved: number
+  submitted: number
+  rejected: number
+}
+
+export interface ComparisonEvaluation {
+  evaluated: boolean
+  accepted: boolean | null
+  evaluated_at: string | null
+  metrics: {
+    trades?: number
+    win_rate?: number
+    total_return?: number
+    max_drawdown?: number
+    method?: string
+  }
+}
+
+export interface StrategyComparisonRow {
+  strategy_version_id: number
+  strategy_key: string
+  version: string
+  status: string
+  created_at: string
+  params: ComparisonParams
+  live: ComparisonLive
+  activity: ComparisonActivity
+  evaluation: ComparisonEvaluation
+}
+
+export interface StrategyComparison {
+  strategies: StrategyComparisonRow[]
+  generated_at: string
+}
+
+export interface AuthSession {
+  authenticated: boolean
+  remote_access: boolean
+  expires_at: string | null
+}
+
+export interface AuthLogin {
+  session_token: string
+  expires_at: string
+  cookie_name: string
+}

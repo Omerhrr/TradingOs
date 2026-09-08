@@ -10,12 +10,13 @@ numbers, the equity curve, and the group breakdowns can never disagree.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import OrderIntent, OrderRecord, StrategyVersion, TradeOutcome
+from app.models import OrderIntent, StrategyEvaluation, StrategyVersion, TradeOutcome, OrderRecord
 
 
 def _group_label(strategy_key: str | None) -> str:
@@ -124,3 +125,105 @@ def trade_analytics(session: Session) -> dict[str, Any]:
             for row in reversed(trades[-50:])
         ],
     }
+
+
+def strategy_comparison(session: Session) -> dict[str, Any]:
+    """Side-by-side view of every strategy version.
+
+    Three evidence layers per strategy, all read-only:
+
+    * live practice outcomes (settled trades joined through intents),
+    * loop/gate activity (intents raised, how far each got),
+    * the latest walk-forward evaluation (the only path to VALIDATED).
+
+    Manual intents (no strategy) are intentionally excluded: the comparison
+    exists to rank strategies, and the analytics page already reports the
+    manual bucket.
+    """
+    strategies = list(session.scalars(select(StrategyVersion).order_by(StrategyVersion.id.desc())))
+
+    settled = session.execute(
+        select(OrderIntent, TradeOutcome)
+        .join(OrderRecord, TradeOutcome.order_record_id == OrderRecord.id)
+        .join(OrderIntent, OrderRecord.order_intent_id == OrderIntent.id)
+        .where(OrderIntent.strategy_version_id.is_not(None))
+        .order_by(TradeOutcome.settled_at.asc(), TradeOutcome.id.asc())
+    ).all()
+
+    outcomes_by_strategy: dict[int, list[dict[str, Any]]] = {}
+    for intent, outcome in settled:
+        if intent.strategy_version_id is None:
+            continue
+        outcomes_by_strategy.setdefault(intent.strategy_version_id, []).append({
+            "realized_pnl": float(outcome.realized_pnl),
+            "outcome": outcome.outcome,
+        })
+
+    latest_evaluations = {
+        evaluation.strategy_version_id: evaluation
+        for evaluation in session.scalars(select(StrategyEvaluation).order_by(StrategyEvaluation.id.asc()))
+    }
+
+    rows: list[dict[str, Any]] = []
+    for strategy in strategies:
+        bucket = outcomes_by_strategy.get(strategy.id, [])
+        trades = len(bucket)
+        wins = sum(1 for row in bucket if row["outcome"] == "WIN")
+        losses = sum(1 for row in bucket if row["outcome"] == "LOSS")
+        pnls = [row["realized_pnl"] for row in bucket]
+        gross_win = sum(pnl for pnl in pnls if pnl > 0)
+        gross_loss = abs(sum(pnl for pnl in pnls if pnl < 0))
+
+        # Drawdown over this strategy's own equity slice only, so a strategy
+        # cannot inherit a hole another one dug.
+        equity = peak = max_drawdown = 0.0
+        for pnl in pnls:
+            equity += pnl
+            peak = max(peak, equity)
+            max_drawdown = max(max_drawdown, peak - equity)
+
+        intents = list(session.scalars(select(OrderIntent).where(OrderIntent.strategy_version_id == strategy.id)))
+        intent_states = [intent.status for intent in intents]
+
+        definition = strategy.definition or {}
+        evaluation = latest_evaluations.get(strategy.id)
+        rows.append({
+            "strategy_version_id": strategy.id,
+            "strategy_key": strategy.strategy_key,
+            "version": strategy.version,
+            "status": strategy.status,
+            "created_at": strategy.created_at,
+            "params": {
+                "fast_window": definition.get("fast_window"),
+                "slow_window": definition.get("slow_window"),
+                "volatility_window": definition.get("volatility_window"),
+                "trade_amount": definition.get("trade_amount"),
+                "duration_minutes": definition.get("duration_minutes"),
+            },
+            "live": {
+                "trades": trades,
+                "wins": wins,
+                "losses": losses,
+                "win_rate": round(wins / trades, 6) if trades else None,
+                "net_pnl": round(sum(pnls), 6),
+                "avg_pnl": round(sum(pnls) / trades, 6) if trades else None,
+                "profit_factor": round(gross_win / gross_loss, 6) if gross_loss > 0 else None,
+                "max_drawdown": round(max_drawdown, 6),
+                "best_pnl": round(max(pnls), 6) if pnls else None,
+                "worst_pnl": round(min(pnls), 6) if pnls else None,
+            },
+            "activity": {
+                "intents": len(intent_states),
+                "approved": sum(1 for state in intent_states if state == "APPROVED"),
+                "submitted": sum(1 for state in intent_states if state in {"SUBMITTED", "OPEN", "SETTLED", "UNKNOWN"}),
+                "rejected": sum(1 for state in intent_states if state == "REJECTED"),
+            },
+            "evaluation": {
+                "evaluated": evaluation is not None,
+                "accepted": evaluation.accepted if evaluation else None,
+                "evaluated_at": evaluation.created_at if evaluation else None,
+                "metrics": evaluation.metrics if evaluation else {},
+            },
+        })
+
+    return {"strategies": rows, "generated_at": datetime.now(UTC)}

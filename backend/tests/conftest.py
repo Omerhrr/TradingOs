@@ -54,6 +54,7 @@ def _restore_pristine_world():
         PositionSnapshot,
         ReconciliationRun,
         RiskPolicy,
+        StrategyEvaluation,
         StrategyVersion,
         SystemState,
         TradeOutcome,
@@ -63,7 +64,7 @@ def _restore_pristine_world():
     with SessionLocal() as session:
         for model in (OrderIntent, OrderRecord, PositionSnapshot, TradeOutcome,
                       LearningEpisode, AccountSnapshot, MarketAsset, FeatureSnapshot,
-                      Candle, ReconciliationRun, LoopRun, StrategyVersion, RiskPolicy,
+                      Candle, ReconciliationRun, LoopRun, StrategyEvaluation, StrategyVersion, RiskPolicy,
                       AccountConfig, EncryptedBrokerCredential, AuditEvent):
             session.query(model).delete()
         if session.scalar(select(AccountConfig.id).limit(1)) is None:

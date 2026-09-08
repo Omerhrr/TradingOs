@@ -112,3 +112,67 @@
 .group-row--recent { grid-template-columns: 110px 90px 60px minmax(120px, 1fr) 80px 80px 90px; }
 @media (max-width: 950px) { .kpi-strip { grid-template-columns: repeat(2, 1fr); } .kpi-cell { border-top: 1px solid var(--line); } .analytics-grid { grid-template-columns: 1fr; } }
 @media (max-width: 620px) { .kpi-strip { grid-template-columns: 1fr; } .desk-form .field-pair, .strategy-eval .field-pair { grid-template-columns: 1fr; } .group-table { overflow-x: auto; } .group-row { min-width: 560px; } .group-row--recent { min-width: 720px; } }
+
+/* --- Loop-panel market tape (candle chart) --------------------------------- */
+.market-tape { margin: 0 26px 20px; border: 1px solid var(--line); background: rgba(12, 15, 15, .55); padding: 14px 16px 12px; }
+.tape-head { display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap; margin-bottom: 12px; }
+.tape-head .micro { margin: 0; color: var(--teal); }
+.tape-controls { display: flex; align-items: center; gap: 8px; }
+.tape-select { border: 1px solid var(--line); background: rgba(8, 10, 10, .8); color: var(--paper); font: 10px 'DM Mono', monospace; letter-spacing: .06em; padding: 8px 10px; outline: none; }
+.tape-select:focus { border-color: var(--teal); }
+.tape-note { margin: 8px 0 6px; }
+.chart-stage { display: grid; gap: 10px; }
+.chart-svg { width: 100%; height: auto; display: block; }
+.chart-text { font-family: 'DM Mono', monospace; font-size: 9px; fill: var(--quiet); letter-spacing: .04em; }
+.chart-text--quiet { fill: rgba(170, 169, 159, .8); }
+.chart-empty { display: grid; place-items: center; gap: 12px; min-height: 180px; color: var(--quiet); font-size: 12px; line-height: 1.7; text-align: center; }
+.chart-legend { display: flex; flex-wrap: wrap; gap: 14px; color: var(--quiet); }
+.legend-key { display: inline-flex; align-items: center; gap: 6px; }
+.swatch { width: 9px; height: 9px; display: inline-block; }
+.swatch--call { background: var(--teal); clip-path: polygon(50% 0, 0 100%, 100% 100%); }
+.swatch--put { background: var(--danger); clip-path: polygon(50% 100%, 0 0, 100% 0); }
+.swatch--hollow { background: transparent; border: 1px solid var(--danger); }
+.swatch--fast { height: 2px; background: var(--brass); }
+.swatch--slow { height: 2px; background: rgba(131, 187, 176, .45); }
+@media (max-width: 620px) { .market-tape { overflow-x: auto; } }
+
+/* --- Strategy comparison ----------------------------------------------------- */
+.compare-focus-card { margin-top: 0; }
+.compare-focus { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.focus-chip { border: 1px solid var(--line); background: transparent; color: var(--quiet); font: 9px 'DM Mono', monospace; letter-spacing: .08em; padding: 8px 10px; transition: color .18s ease, border-color .18s ease, background .18s ease; }
+.focus-chip:hover { color: var(--paper); }
+.focus-chip--active { color: var(--teal); border-color: rgba(131, 187, 176, .55); background: rgba(131, 187, 176, .08); }
+.compare-focus-note { color: var(--brass); }
+.compare-stack { display: grid; gap: 18px; margin-top: 18px; }
+.compare-card--leader { border-color: rgba(131, 187, 176, .4); }
+.compare-heading { align-items: center; }
+.compare-id { display: flex; align-items: center; gap: 14px; }
+.compare-rank { border: 1px solid var(--line); padding: 5px 7px; color: var(--brass); white-space: nowrap; }
+.compare-card--leader .compare-rank { color: var(--teal); border-color: rgba(131, 187, 176, .5); }
+.compare-id h2 { margin: 4px 0 0; font-size: 21px; letter-spacing: -.04em; }
+.compare-chips { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.compare-body { display: grid; grid-template-columns: minmax(170px, .9fr) minmax(0, 1.6fr) minmax(200px, .9fr); gap: 22px; padding: 0 26px 26px; }
+.compare-metric { border-left: 1px solid var(--line); padding: 12px 14px; display: grid; gap: 10px; align-content: start; }
+.compare-metric .micro { color: var(--quiet); }
+.compare-metric strong { font-size: 30px; font-weight: 600; letter-spacing: -.05em; }
+.compare-facts { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin: 0; align-content: start; }
+.compare-facts div { border-left: 1px solid var(--line); padding: 10px 10px; }
+.compare-facts dt { color: var(--quiet); font-size: 9px; letter-spacing: .08em; font-family: 'DM Mono', monospace; }
+.compare-facts dd { margin: 7px 0 0; font-family: 'DM Mono', monospace; font-size: 12px; color: var(--paper); }
+.compare-side { display: grid; gap: 14px; align-content: start; }
+.compare-gate p, .compare-eval p { margin: 7px 0 0; font-size: 11px; line-height: 1.65; color: var(--paper); }
+.compare-eval p:not(.pos):not(.neg) { color: var(--quiet); }
+.compare-gate .micro, .compare-eval .micro { color: var(--brass); }
+.compare-empty { margin-top: 18px; display: grid; place-items: center; gap: 14px; padding: 60px 26px; color: var(--quiet); font-size: 13px; line-height: 1.75; text-align: center; }
+@media (max-width: 950px) { .compare-body { grid-template-columns: 1fr; } }
+
+/* --- Auth rail block ---------------------------------------------------------- */
+.rail-session { display: grid; gap: 9px; padding-bottom: 16px; margin-bottom: 16px; border-bottom: 1px solid var(--line); }
+.rail-session .micro { color: var(--brass); }
+.rail-session-state { margin: 0; font-family: 'DM Mono', monospace; font-size: 10px; letter-spacing: .05em; }
+.rail-session .mini-control { justify-self: start; }
+
+/* --- Login page ---------------------------------------------------------------- */
+.login-card { max-width: 640px; }
+.login-heading { align-items: center; }
+.login-card .desk-form { display: grid; gap: 16px; padding: 0 26px 26px; }

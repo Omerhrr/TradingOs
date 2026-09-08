@@ -19,6 +19,12 @@ class Settings(BaseSettings):
     cors_origins: str = Field(default="http://localhost:3000,http://localhost:3001,http://127.0.0.1:3000,http://127.0.0.1:3001")
     local_admin_token: str | None = None
     credential_encryption_key: str | None = None
+    # Remote access gate: off by default, the app stays a trusted-LAN tool.
+    # When enabled, every request needs the admin token or a login session.
+    remote_access_enabled: bool = False
+    session_secret: str | None = None
+    session_ttl_minutes: int = Field(default=720, ge=5, le=10_080)
+    remote_public_tls: bool = False
     broker_sync_interval_seconds: int = Field(default=30, ge=10, le=3_600)
     broker_asset_refresh_seconds: int = Field(default=300, ge=60, le=86_400)
     broker_candle_count: int = Field(default=200, ge=20, le=1_000)

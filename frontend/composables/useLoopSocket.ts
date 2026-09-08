@@ -22,6 +22,9 @@ let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 let heartbeatTimer: ReturnType<typeof setInterval> | null = null
 let attempts = 0
 let started = false
+// A 4401 rejection is final until the operator signs in again: retrying
+// without new credentials only burns the battery, so reconnects stop.
+let authBlocked = false
 
 function socketUrl(): string {
   const config = useRuntimeConfig()
@@ -38,7 +41,7 @@ function record(event: LoopSocketEvent) {
 }
 
 function scheduleReconnect() {
-  if (reconnectTimer) return
+  if (authBlocked || reconnectTimer) return
   const delay = Math.min(RECONNECT_BASE_MS * 2 ** attempts, RECONNECT_MAX_MS)
   attempts += 1
   status.value = 'offline'
@@ -49,7 +52,7 @@ function scheduleReconnect() {
 }
 
 function open() {
-  if (typeof window === 'undefined' || socket) return
+  if (typeof window === 'undefined' || socket || authBlocked) return
   status.value = 'connecting'
   let instance: WebSocket
   try {
@@ -71,7 +74,14 @@ function open() {
   instance.onmessage = (message) => {
     try {
       const parsed = JSON.parse(message.data as string) as LoopSocketEvent
-      if (parsed && typeof parsed.type === 'string') record(parsed)
+      if (parsed && typeof parsed.type === 'string') {
+        record(parsed)
+        if (parsed.type === 'error' && (parsed.payload as { code?: string } | null)?.code === 'unauthorized') {
+          authBlocked = true
+          clearTimers()
+          status.value = 'offline'
+        }
+      }
     } catch {
       // Non-JSON frame: ignore, the channel only speaks JSON.
     }
@@ -86,6 +96,18 @@ function open() {
   instance.onerror = () => {
     // onclose always follows onerror; reconnect logic lives there.
   }
+}
+
+export function restartLoopSocket() {
+  if (typeof window === 'undefined') return
+  authBlocked = false
+  clearTimers()
+  if (socket) {
+    const closing = socket
+    socket = null
+    closing.close()
+  }
+  open()
 }
 
 export function useLoopSocket() {

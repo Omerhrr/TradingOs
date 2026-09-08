@@ -301,3 +301,99 @@ class TradeAnalyticsResponse(BaseModel):
     by_side: list[GroupStats]
     by_strategy: list[GroupStats]
     recent: list[TradeAnalyticsRow]
+
+
+class ChartCandle(BaseModel):
+    open_time: datetime
+    open: float
+    high: float
+    low: float
+    close: float
+
+
+class ChartMarker(BaseModel):
+    intent_id: int
+    strategy_version_id: int | None
+    symbol: str
+    side: str
+    status: str
+    amount: float
+    candle_open_epoch: int
+    candle_open_time: datetime
+    created_at: datetime
+
+
+class MarketChartResponse(BaseModel):
+    symbol: str
+    timeframe_seconds: int
+    candles: list[ChartCandle]
+    markers: list[ChartMarker]
+    generated_at: datetime
+
+
+class ComparisonParams(BaseModel):
+    fast_window: int | None = None
+    slow_window: int | None = None
+    volatility_window: int | None = None
+    trade_amount: float | None = None
+    duration_minutes: int | None = None
+
+
+class ComparisonLive(BaseModel):
+    trades: int
+    wins: int
+    losses: int
+    win_rate: float | None
+    net_pnl: float
+    avg_pnl: float | None
+    profit_factor: float | None
+    max_drawdown: float
+    best_pnl: float | None
+    worst_pnl: float | None
+
+
+class ComparisonActivity(BaseModel):
+    intents: int
+    approved: int
+    submitted: int
+    rejected: int
+
+
+class ComparisonEvaluation(BaseModel):
+    evaluated: bool
+    accepted: bool | None
+    evaluated_at: datetime | None
+    metrics: dict
+
+
+class StrategyComparisonRow(BaseModel):
+    strategy_version_id: int
+    strategy_key: str
+    version: str
+    status: str
+    created_at: datetime
+    params: ComparisonParams
+    live: ComparisonLive
+    activity: ComparisonActivity
+    evaluation: ComparisonEvaluation
+
+
+class StrategyComparisonResponse(BaseModel):
+    strategies: list[StrategyComparisonRow]
+    generated_at: datetime
+
+
+class AuthLoginInput(BaseModel):
+    token: str = Field(min_length=1, max_length=256)
+
+
+class AuthLoginResponse(BaseModel):
+    session_token: str
+    expires_at: datetime
+    cookie_name: str
+
+
+class AuthSessionResponse(BaseModel):
+    authenticated: bool
+    remote_access: bool
+    expires_at: datetime | None = None

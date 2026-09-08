@@ -1,8 +1,9 @@
 <!-- TradingOS follows The Instrument Room: guarded, low-key, evidence-first operational design. -->
 <script setup lang="ts">
-import type { AuditEvent, LoopRun, LoopStatus, OrderIntent, PositionSnapshot, ReconciliationRun, ResearchRun, RiskPolicy, StrategyVersion, SystemState, WatchlistItem } from '~/types/trading'
+import type { AuditEvent, LoopRun, LoopStatus, MarketChart, OrderIntent, PositionSnapshot, ReconciliationRun, ResearchRun, RiskPolicy, StrategyVersion, SystemState, WatchlistItem } from '~/types/trading'
 
 const api = useTradingApi()
+const auth = useAuth()
 const { status: socketStatus, events: socketEvents, isConnected } = useLoopSocket()
 const isPausing = ref(false)
 const pauseError = ref<string | null>(null)
@@ -16,6 +17,12 @@ const visualAssets = {
   hero: '/tradingos-hero.svg',
 }
 
+// --- Loop-panel market tape --------------------------------------------
+const chart = ref<MarketChart | null>(null)
+const chartError = ref<string | null>(null)
+const chartLoading = ref(false)
+const selectedPair = ref('')
+
 const { data: state, pending: statePending, error: stateError, refresh: refreshState } = await useAsyncData<SystemState>('trading-state', api.getState)
 const { data: risk, error: riskError } = await useAsyncData<RiskPolicy>('risk-policy', api.getRisk)
 const { data: events, refresh: refreshEvents } = await useAsyncData<AuditEvent[]>('audit-events', api.getEvents)
@@ -27,6 +34,41 @@ const { data: reconciliations, refresh: refreshReconciliations } = await useAsyn
 const { data: researchRuns } = await useAsyncData<ResearchRun[]>('research-runs', api.getResearchRuns)
 const { data: loopStatus, refresh: refreshLoopStatus } = await useAsyncData<LoopStatus>('loop-status', api.getLoopStatus)
 const { data: loopRuns, refresh: refreshLoopRuns } = await useAsyncData<LoopRun[]>('loop-runs', api.getLoopRuns)
+
+// --- Loop-panel market tape (needs the watchlist above) ----------------
+function pairKey(symbol: string, timeframe: number): string {
+  return `${symbol}:${timeframe}`
+}
+
+const chartPairs = computed(() => {
+  const items = watchlist.value?.filter(item => item.enabled) ?? []
+  return items.map(item => ({ symbol: item.symbol, timeframe: item.timeframe_seconds, label: `${item.symbol} · ${item.timeframe_seconds}s` }))
+})
+
+async function loadChart() {
+  if (!selectedPair.value) return
+  const [symbol, timeframeText] = selectedPair.value.split(':')
+  const timeframe = Number(timeframeText)
+  if (!symbol || !Number.isFinite(timeframe)) return
+  chartLoading.value = true
+  chartError.value = null
+  try {
+    chart.value = await api.getMarketChart(symbol, timeframe, 120)
+  } catch (error) {
+    chartError.value = error instanceof Error ? error.message : 'The market tape could not be read from the local API.'
+  } finally {
+    chartLoading.value = false
+  }
+}
+
+watch(watchlist, (items) => {
+  if (selectedPair.value || !items?.length) return
+  const first = items.find(item => item.enabled) ?? items[0]
+  if (first) {
+    selectedPair.value = pairKey(first.symbol, first.timeframe_seconds)
+    void loadChart()
+  }
+}, { immediate: true })
 
 const runtime = computed(() => state.value?.system_state ?? 'UNAVAILABLE')
 const sourceStatus = computed(() => state.value?.broker_connection === 'CONNECTED' ? 'RECONCILED' : 'AWAITING BROKER')
@@ -98,6 +140,14 @@ async function runLoopTick() {
 onMounted(() => {
   adminToken.value = window.sessionStorage.getItem('tradingos-local-admin-token') ?? ''
   window.setInterval(() => { now.value = new Date() }, 30_000)
+  if (auth.session.value === null) void auth.bootstrap()
+  if (!selectedPair.value) {
+    const first = chartPairs.value[0]
+    if (first) {
+      selectedPair.value = pairKey(first.symbol, first.timeframe)
+      void loadChart()
+    }
+  }
 })
 
 // Live channel: one inbound event is enough to refresh the affected panels.
@@ -112,7 +162,13 @@ watch(socketEvents, (list) => {
   if (latest.type === 'loop.tick.completed' || latest.type === 'loop.tick.failed') {
     tickNotice.value = null
     void Promise.all([refreshLoopStatus(), refreshLoopRuns(), refreshState(), refreshIntents(), refreshEvents(), refreshReconciliations()])
+    if (latest.type === 'loop.tick.completed') void loadChart()
     return
+  }
+  if (latest.type === 'loop.signal') {
+    const payloadSymbol = typeof latest.payload.symbol === 'string' ? latest.payload.symbol : null
+    const payloadTimeframe = typeof latest.payload.timeframe_seconds === 'number' ? latest.payload.timeframe_seconds : null
+    if (payloadSymbol && payloadTimeframe && selectedPair.value === pairKey(payloadSymbol, payloadTimeframe)) void loadChart()
   }
   if (latest.type === 'execution.trade.settled' || latest.type === 'execution.order.submitted' || latest.type === 'system.state_changed' || latest.type === 'reconciliation.completed') {
     void Promise.all([refreshState(), refreshIntents(), refreshEvents(), refreshLoopStatus()])
@@ -164,11 +220,20 @@ function socketEventNote(type: string, payload: Record<string, unknown>): string
         <a class="nav-link" href="#loop"><span>05</span> Strategy loop</a>
         <NuxtLink class="nav-link" to="/strategies"><span>06</span> Strategy desk</NuxtLink>
         <NuxtLink class="nav-link" to="/analytics"><span>07</span> Outcome analytics</NuxtLink>
-        <a class="nav-link" href="#evidence"><span>08</span> Evidence log</a>
-        <NuxtLink class="nav-link" to="/setup"><span>09</span> Local setup</NuxtLink>
+        <NuxtLink class="nav-link" to="/compare"><span>08</span> Strategy compare</NuxtLink>
+        <a class="nav-link" href="#evidence"><span>09</span> Evidence log</a>
+        <NuxtLink class="nav-link" to="/setup"><span>10</span> Local setup</NuxtLink>
       </nav>
 
       <div class="rail-foot">
+        <div v-if="auth.isRemoteGated.value" class="rail-session">
+          <p class="mono micro">REMOTE SESSION</p>
+          <p class="rail-session-state" :class="auth.isAuthenticated.value ? 'pos' : 'neg'">
+            {{ auth.isAuthenticated.value ? `OPEN · EXPIRES ${auth.session.value?.expires_at ? new Date(auth.session.value.expires_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '—'}` : 'CLOSED' }}
+          </p>
+          <button v-if="auth.isAuthenticated.value" class="mini-control mini-control--danger" type="button" @click="auth.logout()">SIGN OUT</button>
+          <NuxtLink v-else class="mini-control" to="/login">SIGN IN</NuxtLink>
+        </div>
         <p class="mono micro">SYSTEM CONTRACT</p>
         <p>Local-first. Practice controls are the only execution surface.</p>
       </div>
@@ -340,6 +405,24 @@ function socketEventNote(type: string, payload: Record<string, unknown>): string
               </button>
               <span v-if="!hasAdminToken" class="mono loop-hint">SET THE ADMIN TOKEN ON THE LOCAL SETUP PAGE TO DRIVE THE LOOP</span>
             </div>
+          </div>
+          <div class="market-tape">
+            <div class="tape-head">
+              <p class="mono micro">MARKET TAPE · SIGNAL MARKERS</p>
+              <div class="tape-controls">
+                <select v-model="selectedPair" class="tape-select" aria-label="Chart pair" @change="loadChart">
+                  <option v-for="pair in chartPairs" :key="pairKey(pair.symbol, pair.timeframe)" :value="pairKey(pair.symbol, pair.timeframe)">{{ pair.label }}</option>
+                </select>
+                <button class="mini-control" type="button" :disabled="chartLoading" @click="loadChart">{{ chartLoading ? 'LOADING…' : 'REFRESH' }}</button>
+              </div>
+            </div>
+            <p v-if="chartError" class="error-note tape-note">{{ chartError }}</p>
+            <CandleChart
+              v-if="chart?.candles?.length"
+              :candles="chart.candles"
+              :markers="chart.markers"
+            />
+            <p v-if="chart && chart.markers.length === 0 && chart.candles.length" class="quiet-note tape-note">No loop signals on this pair yet — markers appear the moment the loop gates a CALL or PUT.</p>
           </div>
           <div class="loop-runs">
             <div class="loop-row loop-row--head"><span>TIME</span><span>STATE</span><span>SIGNALS</span><span>INTENTS</span><span>SUBMITTED</span><span>NOTE</span></div>

@@ -1,12 +1,26 @@
 // TradingOS follows The Instrument Room: guarded, low-key, evidence-first operational design.
-import type { AuditEvent, BrokerConnection, BrokerCredentialInput, LoopRun, LoopStatus, OrderIntent, PositionSnapshot, ReconciliationRun, ResearchRun, RiskPolicy, StrategyDefinition, StrategyEvaluation, StrategyStatusInput, StrategyVersion, SystemState, TradeAnalytics, WatchlistItem } from '~/types/trading'
+import type { AuditEvent, AuthLogin, AuthSession, BrokerConnection, BrokerCredentialInput, LoopRun, LoopStatus, MarketChart, OrderIntent, PositionSnapshot, ReconciliationRun, ResearchRun, RiskPolicy, StrategyComparison, StrategyDefinition, StrategyEvaluation, StrategyStatusInput, StrategyVersion, SystemState, TradeAnalytics, WatchlistItem } from '~/types/trading'
 
 export function useTradingApi() {
   const config = useRuntimeConfig()
   const apiBaseUrl = config.public.apiBaseUrl
 
+  // credentials: 'include' lets the auth session cookie ride along in
+  // remote-gated mode; it changes nothing for the local-first flow.
+  // A 401 under an active remote gate means "signed out": the auth state is
+  // cleared once and the router middleware takes over from there.
+  const client = $fetch.create({
+    baseURL: apiBaseUrl,
+    credentials: 'include',
+    onResponseError(context) {
+      if (context.response?.status !== 401 || import.meta.server) return
+      const auth = useAuth()
+      if (auth.session.value?.remote_access) auth.handleUnauthorized()
+    },
+  })
+
   const request = <T>(path: string, options?: Parameters<typeof $fetch<T>>[1]) =>
-    $fetch<T>(`${apiBaseUrl}${path}`, { ...options })
+    client<T>(path, { ...options }) as Promise<T>
 
   const localControl = <T>(path: string, adminToken: string, options?: Parameters<typeof $fetch<T>>[1]) =>
     request<T>(path, {
@@ -30,6 +44,9 @@ export function useTradingApi() {
     getLoopStatus: () => request<LoopStatus>('/loop/status'),
     getLoopRuns: () => request<LoopRun[]>('/loop/runs'),
     getTradeAnalytics: () => request<TradeAnalytics>('/analytics/trades'),
+    getStrategyComparison: () => request<StrategyComparison>('/analytics/strategies/compare'),
+    getMarketChart: (symbol: string, timeframeSeconds: number, limit = 120) =>
+      request<MarketChart>(`/market/chart?symbol=${encodeURIComponent(symbol)}&timeframe_seconds=${timeframeSeconds}&limit=${limit}`),
     getStrategyEvaluations: (strategyId: number) => request<StrategyEvaluation[]>(`/strategies/${strategyId}/evaluations`),
     createStrategy: (adminToken: string, payload: { strategy_key: string; version: string; definition: StrategyDefinition }) => localControl<StrategyVersion>('/strategies', adminToken, { method: 'POST', body: payload }),
     updateStrategyStatus: (adminToken: string, strategyId: number, payload: StrategyStatusInput) => localControl<StrategyVersion>(`/strategies/${strategyId}/status`, adminToken, { method: 'PUT', body: payload }),

@@ -3,21 +3,25 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, WebSocket, WebSocketDisconnect, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.database import Base, SessionLocal, engine, get_session
 from app.models import AIResearchRun, AccountConfig, AccountSnapshot, AuditEvent, Candle, EncryptedBrokerCredential, FeatureSnapshot, LoopRun, MarketAsset, OrderIntent, OrderRecord, PositionSnapshot, ReconciliationRun, RiskPolicy, StrategyEvaluation, StrategyVersion, SystemState, WatchlistItem
-from app.schemas import AccountStateResponse, AuditEventResponse, BrokerConnectionResponse, BrokerCredentialInput, CandleResponse, FeatureResponse, HealthResponse, LoopRunResponse, LoopStatusResponse, MarketAssetResponse, OrderIntentInput, OrderIntentResponse, OrderResponse, PositionResponse, ReconciliationResponse, ResearchRunResponse, RiskPolicyResponse, StrategyCreateInput, StrategyEvaluationInput, StrategyEvaluationResponse, StrategyResponse, StrategyStatusUpdateInput, TradeAnalyticsResponse, TradeResponse, WatchlistItemResponse, WatchlistUpdate
-from app.services.analytics import trade_analytics
+from app.schemas import AccountStateResponse, AuditEventResponse, AuthLoginInput, AuthLoginResponse, AuthSessionResponse, BrokerConnectionResponse, BrokerCredentialInput, CandleResponse, FeatureResponse, HealthResponse, LoopRunResponse, LoopStatusResponse, MarketAssetResponse, MarketChartResponse, OrderIntentInput, OrderIntentResponse, OrderResponse, PositionResponse, ReconciliationResponse, ResearchRunResponse, RiskPolicyResponse, StrategyComparisonResponse, StrategyCreateInput, StrategyEvaluationInput, StrategyEvaluationResponse, StrategyResponse, StrategyStatusUpdateInput, TradeAnalyticsResponse, TradeResponse, WatchlistItemResponse, WatchlistUpdate
+from app.services.analytics import strategy_comparison, trade_analytics
+from app.services.auth import SESSION_COOKIE, LoginGate, SessionConfigurationError, SessionManager, credential_ok
 from app.services.broker import IQAirBrokerAdapter
 from app.services.credentials import BrokerCredentials, CredentialConfigurationError, CredentialVault
 from app.services.events import event_bus, publish_event
+from app.services.market_view import market_chart
 from app.services.worker import BrokerWorker
 from app.services.strategy import evaluate_strategy, persist_features
 from app.services.research import ResearchBudgetExceeded, ResearchService
@@ -30,6 +34,7 @@ settings = get_settings()
 worker = BrokerWorker(IQAirBrokerAdapter(), settings.broker_candle_count)
 loop_engine = LoopEngine(worker, settings)
 runtime = LocalRuntime(settings, SessionLocal, worker, loop_engine)
+login_gate = LoginGate()
 
 
 def _seed_control_plane(session: Session) -> None:
@@ -63,6 +68,37 @@ app = FastAPI(title="TradingOS API", version="0.2.0", description="Practice-only
 # local admin control (credential storage, practice connect, reconciliation).
 app.add_middleware(CORSMiddleware, allow_origins=settings.allowed_origins, allow_credentials=True, allow_methods=["GET", "POST", "PUT"], allow_headers=["Content-Type", "Authorization", "X-TradingOS-Token"])
 
+# Remote-access gate: when TRADINGOS_REMOTE_ACCESS_ENABLED is set, every HTTP
+# request must present the admin token or a login session, except the health
+# probe and the auth endpoints themselves. With the gate off, the historical
+# local-first behavior is preserved byte for byte.
+_AUTH_EXEMPT_PATHS: set[str] | None = None
+
+
+def _auth_exempt_paths() -> set[str]:
+    global _AUTH_EXEMPT_PATHS
+    if _AUTH_EXEMPT_PATHS is None:
+        _AUTH_EXEMPT_PATHS = {
+            f"{settings.api_prefix}/health",
+            f"{settings.api_prefix}/auth/login",
+            f"{settings.api_prefix}/auth/session",
+        }
+    return _AUTH_EXEMPT_PATHS
+
+
+@app.middleware("http")
+async def remote_access_gate(request: Request, call_next):
+    if settings.remote_access_enabled:
+        scope_headers = {key.decode().lower(): value.decode() for key, value in request.scope.get("headers", [])}
+        authorized = credential_ok(
+            settings=settings,
+            headers=scope_headers,
+            cookies=dict(request.cookies),
+        )
+        if not authorized and request.url.path not in _auth_exempt_paths():
+            return JSONResponse(status_code=status.HTTP_401_UNAUTHORIZED, content={"detail": "Authentication required. Sign in through /api/v1/auth/login or present the admin token."})
+    return await call_next(request)
+
 
 def _account(session: Session) -> AccountConfig:
     account = session.scalar(select(AccountConfig).limit(1))
@@ -71,12 +107,29 @@ def _account(session: Session) -> AccountConfig:
     return account
 
 
-def _require_local_admin(x_tradingos_token: str | None = Header(default=None)) -> None:
-    """Credential and broker controls require a configured local admin token."""
+def _require_local_admin(request: Request, x_tradingos_token: str | None = Header(default=None)) -> None:
+    """Credential and broker controls require the local admin token.
+
+    A valid login session is accepted as an equivalent credential so a remote
+    operator who signed in through /auth/login can drive admin controls
+    without re-pasting the token into every browser tab. The header path
+    keeps working for scripts and for the local-first flow.
+    """
     if not settings.local_admin_token:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Set TRADINGOS_LOCAL_ADMIN_TOKEN before enabling local broker controls.")
-    if x_tradingos_token != settings.local_admin_token:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Local broker control token is invalid.")
+    if x_tradingos_token and hmac.compare_digest(x_tradingos_token, settings.local_admin_token):
+        return
+    authorization = request.headers.get("authorization", "")
+    if authorization.lower().startswith("bearer "):
+        bearer = authorization[7:].strip()
+        if hmac.compare_digest(bearer, settings.local_admin_token):
+            return
+        if SessionManager(settings).verify(bearer):
+            return
+    cookie_token = request.cookies.get(SESSION_COOKIE)
+    if cookie_token and SessionManager(settings).verify(cookie_token):
+        return
+    raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Local broker control token is invalid.")
 
 
 def _vault() -> CredentialVault:
@@ -84,6 +137,81 @@ def _vault() -> CredentialVault:
         return CredentialVault(settings.credential_encryption_key)
     except CredentialConfigurationError as exc:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+
+
+# --------------------------------------------------------------------- auth
+
+
+def _client_ip(request: Request) -> str:
+    return request.client.host if request.client else "unknown"
+
+
+@app.post(f"{settings.api_prefix}/auth/login", response_model=AuthLoginResponse, tags=["auth"])
+def login(payload: AuthLoginInput, request: Request, response: Response) -> AuthLoginResponse:
+    """Exchange the local admin token for a signed, expiring session.
+
+    Failed attempts are rate limited per source IP and audited; the supplied
+    secret is never written to the ledger or the response.
+    """
+    if not settings.local_admin_token:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Set TRADINGOS_LOCAL_ADMIN_TOKEN before enabling logins.")
+    ip = _client_ip(request)
+    lock_remaining = login_gate.check(ip)
+    if lock_remaining is not None:
+        publish_event("auth.locked", {"source": ip})
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=f"Too many failed sign-ins; retry in {lock_remaining}s.", headers={"Retry-After": str(lock_remaining)})
+    if not hmac.compare_digest(payload.token, settings.local_admin_token):
+        login_gate.record_failure(ip)
+        with SessionLocal() as audit_session:
+            audit_session.add(AuditEvent(event_type="AUTH_LOGIN_FAILED", severity="WARNING", message="A sign-in attempt presented an invalid admin token.", payload={"source": ip}))
+            audit_session.commit()
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Admin token is invalid.")
+    login_gate.record_success(ip)
+    try:
+        manager = SessionManager(settings)
+    except SessionConfigurationError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+    token, expires_at = manager.issue()
+    response.set_cookie(
+        SESSION_COOKIE,
+        token,
+        max_age=manager.ttl_seconds,
+        httponly=True,
+        samesite="strict",
+        secure=settings.remote_public_tls,
+        path="/",
+    )
+    with SessionLocal() as audit_session:
+        audit_session.add(AuditEvent(event_type="AUTH_LOGIN_SUCCESS", severity="INFO", message="A remote operator signed in; a session was issued.", payload={"source": ip, "expires_at": expires_at.isoformat()}))
+        audit_session.commit()
+    return AuthLoginResponse(session_token=token, expires_at=expires_at, cookie_name=SESSION_COOKIE)
+
+
+@app.post(f"{settings.api_prefix}/auth/logout", tags=["auth"])
+def logout(request: Request, response: Response) -> dict:
+    response.delete_cookie(SESSION_COOKIE, path="/")
+    with SessionLocal() as audit_session:
+        audit_session.add(AuditEvent(event_type="AUTH_LOGOUT", severity="INFO", message="A session signed out; the session cookie was cleared.", payload={"source": _client_ip(request)}))
+        audit_session.commit()
+    return {"detail": "Signed out."}
+
+
+@app.get(f"{settings.api_prefix}/auth/session", response_model=AuthSessionResponse, tags=["auth"])
+def auth_session(request: Request) -> AuthSessionResponse:
+    """Bootstrap probe for the UI: is remote access on, and is this browser in?"""
+    if not settings.remote_access_enabled:
+        return AuthSessionResponse(authenticated=False, remote_access=False)
+    scope_headers = {key.decode().lower(): value.decode() for key, value in request.scope.get("headers", [])}
+    authorized = credential_ok(settings=settings, headers=scope_headers, cookies=dict(request.cookies))
+    expires_at = None
+    cookie_token = request.cookies.get(SESSION_COOKIE)
+    if cookie_token:
+        parts = cookie_token.split(".")
+        if len(parts) == 4 and parts[1].isdigit():
+            from datetime import UTC as _UTC, datetime as _datetime
+
+            expires_at = _datetime.fromtimestamp(int(parts[1]), tz=_UTC)
+    return AuthSessionResponse(authenticated=authorized, remote_access=True, expires_at=expires_at)
 
 
 @app.get(f"{settings.api_prefix}/health", response_model=HealthResponse, tags=["system"])
@@ -222,6 +350,12 @@ def trade_outcome_analytics(session: Session = Depends(get_session)) -> dict:
     return trade_analytics(session)
 
 
+@app.get(f"{settings.api_prefix}/analytics/strategies/compare", response_model=StrategyComparisonResponse, tags=["analytics"])
+def compare_strategies(session: Session = Depends(get_session)) -> dict:
+    """Side-by-side evidence for every strategy: live outcomes, gate activity, evaluation."""
+    return strategy_comparison(session)
+
+
 @app.get(f"{settings.api_prefix}/orders", response_model=list[OrderResponse], tags=["orders"])
 def list_orders(session: Session = Depends(get_session)) -> list[OrderRecord]:
     return list(session.scalars(select(OrderRecord).order_by(OrderRecord.id.desc()).limit(200)))
@@ -319,6 +453,12 @@ def list_candles(symbol: str = Query(min_length=1, max_length=80), timeframe_sec
     return list(session.scalars(select(Candle).where(Candle.symbol == symbol.upper(), Candle.timeframe_seconds == timeframe_seconds).order_by(Candle.open_time.desc()).limit(limit)))
 
 
+@app.get(f"{settings.api_prefix}/market/chart", response_model=MarketChartResponse, tags=["market"])
+def market_chart_view(symbol: str = Query(min_length=1, max_length=80), timeframe_seconds: int = Query(60, ge=1, le=86_400), limit: int = Query(120, ge=10, le=500), session: Session = Depends(get_session)) -> dict:
+    """Candles plus loop-signal markers for the loop-panel chart."""
+    return market_chart(session, symbol, timeframe_seconds, limit)
+
+
 @app.get(f"{settings.api_prefix}/positions", response_model=list[PositionResponse], tags=["positions"])
 def list_positions(session: Session = Depends(get_session)) -> list[PositionSnapshot]:
     return list(session.scalars(select(PositionSnapshot).order_by(PositionSnapshot.observed_at.desc()).limit(500)))
@@ -398,8 +538,21 @@ async def loop_events_socket(websocket: WebSocket) -> None:
     The client may send "ping" to keep intermediaries from idling the socket
     out; each ping is answered with a pong frame. Disconnects (browser tab
     closed, network drop) release the subscriber queue immediately.
+    When remote access is enabled the socket demands the same credentials as
+    HTTP: cookie, bearer/admin token, or an ``access_token`` query parameter.
     """
+    scope_headers = {key.decode().lower(): value.decode() for key, value in websocket.scope.get("headers", [])}
+    authorized = credential_ok(
+        settings=settings,
+        headers=scope_headers,
+        cookies=dict(websocket.cookies),
+        query_token=websocket.query_params.get("access_token"),
+    )
     await websocket.accept()
+    if not authorized:
+        await websocket.send_json({"type": "error", "payload": {"code": "unauthorized", "detail": "Sign in before opening the live channel."}})
+        await websocket.close(code=4401)
+        return
     queue = event_bus.subscribe()
     try:
         with SessionLocal() as session:
