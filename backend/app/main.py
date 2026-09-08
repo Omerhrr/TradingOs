@@ -15,10 +15,10 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.database import Base, SessionLocal, engine, get_session
 from app.models import AIResearchRun, AccountConfig, AccountSnapshot, AuditEvent, Candle, EncryptedBrokerCredential, FeatureSnapshot, LoopRun, MarketAsset, OrderIntent, OrderRecord, PositionSnapshot, ReconciliationRun, RiskPolicy, StrategyEvaluation, StrategyVersion, SystemState, TradeOutcome, TwoFactorSecret, WatchlistItem
-from app.schemas import AccountStateResponse, AuditEventResponse, AuthLoginInput, AuthLoginResponse, AuthSessionResponse, BacktestRunInput, BacktestRunResponse, BacktestSweepInput, BacktestSweepResponse, BrokerConnectionResponse, BrokerCredentialInput, CandleResponse, FeatureResponse, HealthResponse, LoopRunResponse, LoopStatusResponse, MarketAssetResponse, MarketChartResponse, OrderIntentInput, OrderIntentResponse, OrderResponse, PositionResponse, ReconciliationResponse, ResearchRunResponse, RiskPolicyResponse, StrategyComparisonResponse, StrategyCreateInput, StrategyEvaluationInput, StrategyEvaluationResponse, StrategyResponse, StrategyStatusUpdateInput, TotpProvisionResponse, TotpStatusResponse, TradeAnalyticsResponse, TradeResponse, WatchlistItemResponse, WatchlistUpdate
-from app.services.analytics import strategy_comparison, trade_analytics
-from app.services.auth import SESSION_COOKIE, LoginGate, SessionConfigurationError, SessionManager, credential_ok, generate_totp_secret, otpauth_uri, totp_verify
-from app.services.backtest import run_backtest, run_sweep
+from app.schemas import AccountStateResponse, AuditEventResponse, AuthLoginInput, AuthLoginResponse, AuthSessionResponse, BacktestRunInput, BacktestRunResponse, BacktestSweepInput, BacktestSweepResponse, BrokerConnectionResponse, BrokerCredentialInput, CandleResponse, FeatureResponse, HealthResponse, LoopRunResponse, LoopStatusResponse, MarketAssetResponse, MarketChartResponse, OrderIntentInput, OrderIntentResponse, OrderResponse, PositionResponse, ReconciliationResponse, ResearchRunResponse, RiskPolicyResponse, StrategyComparisonResponse, StrategyCreateInput, StrategyEvaluationInput, StrategyEvaluationResponse, StrategyFromSweepInput, StrategyResponse, StrategyStatusUpdateInput, SweepPickSaveResponse, SymbolDrilldownResponse, TotpProvisionResponse, TotpStatusResponse, TradeAnalyticsResponse, TradeResponse, WatchlistItemResponse, WatchlistUpdate
+from app.services.analytics import strategy_comparison, symbol_drilldown, trade_analytics
+from app.services.auth import SESSION_COOKIE, LoginGate, SessionConfigurationError, SessionManager, credential_ok, generate_totp_secret, otpauth_uri, totp_qr_svg, totp_verify
+from app.services.backtest import run_backtest, run_sweep, save_sweep_pick, SweepPickRejected
 from app.services.broker import IQAirBrokerAdapter
 from app.services.credentials import BrokerCredentials, CredentialConfigurationError, CredentialVault
 from app.services.events import event_bus, publish_event
@@ -253,7 +253,9 @@ def provision_totp(session: Session = Depends(get_session)) -> TotpProvisionResp
         row.rotated_at = utc_now()
     session.add(AuditEvent(event_type="AUTH_TOTP_PROVISIONED", severity="WARNING", message="A TOTP authenticator secret was provisioned for the login gate; the plaintext was shown once and never stored.", payload={}))
     session.commit()
-    return TotpProvisionResponse(secret=secret, otpauth_uri=otpauth_uri(secret))
+    # The QR encodes the same provisioning URI — it is exactly as sensitive as
+    # the secret, so it ships only in this one response and is never re-served.
+    return TotpProvisionResponse(secret=secret, otpauth_uri=otpauth_uri(secret), qr_svg=totp_qr_svg(otpauth_uri(secret)))
 
 
 @app.get(f"{settings.api_prefix}/auth/totp/status", response_model=TotpStatusResponse, dependencies=[Depends(_require_local_admin)], tags=["auth"])
@@ -333,6 +335,30 @@ def create_strategy(payload: StrategyCreateInput, session: Session = Depends(get
     session.commit()
     session.refresh(strategy)
     return strategy
+
+
+@app.post(f"{settings.api_prefix}/strategies/from-sweep", response_model=SweepPickSaveResponse, dependencies=[Depends(_require_local_admin)], tags=["strategies"])
+def create_strategy_from_sweep(payload: StrategyFromSweepInput, session: Session = Depends(get_session)) -> dict:
+    """Promote a lab sweep pick to a DRAFT strategy version.
+
+    Evidence is recomputed server-side over the candles stored right now, so
+    the persisted validation summary can never be fabricated by the client.
+    VALIDATED status is still earned only through the persisted evaluation.
+    """
+    try:
+        return save_sweep_pick(
+            session,
+            strategy_key=payload.strategy_key,
+            version=payload.version,
+            symbol=payload.symbol,
+            timeframe_seconds=payload.timeframe_seconds,
+            censor_gap_seconds=payload.censor_gap_seconds,
+            fast_window=payload.fast_window,
+            slow_window=payload.slow_window,
+            volatility_window=payload.volatility_window,
+        )
+    except SweepPickRejected as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
 
 @app.post(f"{settings.api_prefix}/strategies/{{strategy_id}}/evaluate", response_model=StrategyEvaluationResponse, dependencies=[Depends(_require_local_admin)], tags=["strategies"])
@@ -441,6 +467,18 @@ def trade_outcome_analytics(session: Session = Depends(get_session)) -> dict:
 def compare_strategies(session: Session = Depends(get_session)) -> dict:
     """Side-by-side evidence for every strategy: live outcomes, gate activity, evaluation."""
     return strategy_comparison(session)
+
+
+@app.get(f"{settings.api_prefix}/analytics/symbols/{{symbol}}", response_model=SymbolDrilldownResponse, tags=["analytics"])
+def symbol_drilldown_view(symbol: str, session: Session = Depends(get_session)) -> dict:
+    """Per-symbol drill-down over settled evidence: KPIs, own-slice equity, side/strategy splits."""
+    symbol = symbol.strip()
+    if not symbol:
+        raise HTTPException(status_code=422, detail="A symbol is required.")
+    try:
+        return symbol_drilldown(session, symbol)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @app.get(f"{settings.api_prefix}/orders", response_model=list[OrderResponse], tags=["orders"])

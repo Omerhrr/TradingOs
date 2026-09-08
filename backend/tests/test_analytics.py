@@ -217,3 +217,77 @@ def test_strategy_evaluations_listing() -> None:
     assert rows[0]["strategy_version_id"] == strategy_id
     assert rows[0]["metrics"]["trades"] == 37
     assert rows[0]["accepted"] is True
+
+
+# ----------------------------------------------------------------- drill-down
+
+
+def _seed_multi_symbol_plan() -> None:
+    start = datetime(2026, 9, 1, 10, 0, tzinfo=UTC)
+    plan = [
+        (0, "EURUSD", "CALL", 5.0, "WIN"),
+        (1, "GBPUSD", "PUT", -3.0, "LOSS"),
+        (2, "GBPUSD", "CALL", 8.0, "WIN"),
+        (3, "EURUSD", "PUT", -2.0, "LOSS"),
+    ]
+    for index, (offset, symbol, side, pnl, outcome) in enumerate(plan):
+        _seed_trade(
+            idempotency_key=f"drill-{index}",
+            strategy_id=None,
+            symbol=symbol,
+            side=side,
+            amount=5.0,
+            broker_order_id=f"drill-broker-{index}",
+            pnl=pnl,
+            outcome=outcome,
+            settled_at=start + timedelta(minutes=offset),
+        )
+
+
+def test_symbol_drilldown_scopes_every_number_to_the_symbol() -> None:
+    _seed_multi_symbol_plan()
+    with TestClient(app) as client:
+        response = client.get("/api/v1/analytics/symbols/EURUSD")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["symbol"] == "EURUSD"
+    assert body["total_trades"] == 2
+    assert body["wins"] == 1 and body["losses"] == 1
+    assert body["net_pnl"] == 3.0
+    assert body["win_rate"] == 0.5
+    assert body["profit_factor"] == 2.5  # gross 5 / gross loss 2
+    # Own-slice equity: 5 -> 3, drawdown 2.0 — never GBP's 3.0 hole.
+    assert [point["equity"] for point in body["equity_curve"]] == [5.0, 3.0]
+    assert body["max_drawdown"] == 2.0
+    sides = {row["group"]: row for row in body["by_side"]}
+    assert set(sides) == {"CALL", "PUT"}
+    assert sides["CALL"]["net_pnl"] == 5.0
+    assert sides["PUT"]["net_pnl"] == -2.0
+    strategies = {row["group"]: row for row in body["by_strategy"]}
+    assert set(strategies) == {"manual"}
+    assert [row["realized_pnl"] for row in body["recent"]] == [-2.0, 5.0]
+    # A lowercase query resolves to the same ledger.
+    with TestClient(app) as client:
+        assert client.get("/api/v1/analytics/symbols/eurusd").json()["symbol"] == "EURUSD"
+
+
+def test_symbol_drilldown_drawdown_is_isolated_per_symbol() -> None:
+    """A symbol's curve never inherits another instrument's hole."""
+    _seed_multi_symbol_plan()
+    with TestClient(app) as client:
+        gbp = client.get("/api/v1/analytics/symbols/GBPUSD").json()
+        headline = client.get("/api/v1/analytics/trades").json()
+    # GBP's own equity walk is -3 then +5: peak(0) - equity(-3) = 3, then the
+    # curve recovers above water, so its own-slice max drawdown is 3.0.
+    assert [point["equity"] for point in gbp["equity_curve"]] == [-3.0, 5.0]
+    assert gbp["max_drawdown"] == 3.0
+    # The headline drawdown over all four trades happens to be 3.0 too, but it
+    # is computed over its own curve — each view stands on its own numbers.
+    assert headline["max_drawdown"] == 3.0
+
+
+def test_symbol_drilldown_unknown_symbol_is_404() -> None:
+    with TestClient(app) as client:
+        response = client.get("/api/v1/analytics/symbols/NOSUCH")
+    assert response.status_code == 404
+    assert "NOSUCH" in response.json()["detail"]

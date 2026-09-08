@@ -19,7 +19,7 @@ from app.config import get_settings
 from app.database import SessionLocal
 from app.main import app, login_gate
 from app.models import AuditEvent, TwoFactorSecret
-from app.services.auth import totp_code, totp_verify
+from app.services.auth import totp_code, totp_qr_svg, totp_verify
 
 settings = get_settings()
 ADMIN = "test-local-admin-token"
@@ -104,6 +104,32 @@ def test_provision_rotates_and_never_audits_the_secret(client) -> None:
         assert all(first not in json.dumps(event.payload) and second not in json.dumps(event.payload) for event in events)
     status = client.get("/api/v1/auth/totp/status", headers=ADMIN_HEADER)
     assert status.json() == {"required": False, "provisioned": True}
+
+
+def test_provision_returns_scannable_qr_exactly_once(client) -> None:
+    """The QR renders the otpauth URI into matrix form: no secret as text."""
+    response = client.post("/api/v1/auth/totp/provision", headers=ADMIN_HEADER)
+    assert response.status_code == 200
+    body = response.json()
+    qr, secret, uri = body["qr_svg"], body["secret"], body["otpauth_uri"]
+    assert qr.lstrip().startswith("<svg")
+    assert "</svg>" in qr
+    # Matrix-encoded, not text-encoded: a file search for the secret or URI
+    # must come up empty, exactly like the audit ledger.
+    assert secret not in qr
+    assert uri not in qr
+    # Only this one response ever carries it: the status endpoint stays clean.
+    status = client.get("/api/v1/auth/totp/status", headers=ADMIN_HEADER)
+    assert "qr_svg" not in status.json()
+
+
+def test_qr_svg_is_deterministic_and_secret_bound() -> None:
+    from app.services.auth import otpauth_uri
+
+    uri_a = otpauth_uri("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ")
+    uri_b = otpauth_uri("JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP")
+    assert totp_qr_svg(uri_a) == totp_qr_svg(uri_a)  # deterministic
+    assert totp_qr_svg(uri_a) != totp_qr_svg(uri_b)  # bound to the secret
 
 
 def test_disable_fails_the_gate_closed(client) -> None:

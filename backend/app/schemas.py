@@ -390,6 +390,30 @@ class StrategyComparisonResponse(BaseModel):
     generated_at: datetime
 
 
+class SymbolDrilldownResponse(BaseModel):
+    """Per-symbol drill-down: the same settled-evidence projection as the
+    headline analytics, scoped to one instrument."""
+
+    symbol: str
+    total_trades: int
+    wins: int
+    losses: int
+    flat: int
+    win_rate: float | None
+    net_pnl: float
+    avg_pnl: float | None
+    avg_win: float | None
+    avg_loss: float | None
+    profit_factor: float | None
+    max_drawdown: float
+    best_pnl: float | None
+    worst_pnl: float | None
+    equity_curve: list[EquityPoint]
+    by_side: list[GroupStats]
+    by_strategy: list[GroupStats]
+    recent: list[TradeAnalyticsRow]
+
+
 class AuthLoginInput(BaseModel):
     token: str = Field(min_length=1, max_length=256)
     totp_code: str | None = Field(default=None, min_length=1, max_length=12)
@@ -409,10 +433,15 @@ class AuthSessionResponse(BaseModel):
 
 
 class TotpProvisionResponse(BaseModel):
-    """The provisioning material is returned exactly once and never persisted in plaintext."""
+    """The provisioning material is returned exactly once and never persisted in plaintext.
+
+    The QR SVG encodes the otpauth URI — it is equivalent to the secret itself
+    and lives only inside this one response.
+    """
 
     secret: str
     otpauth_uri: str
+    qr_svg: str
 
 
 class TotpStatusResponse(BaseModel):
@@ -498,3 +527,36 @@ class BacktestSweepResponse(BaseModel):
     volatility_window: int
     cells: list[BacktestSweepCell]
     generated_at: datetime
+
+
+class StrategyFromSweepInput(BaseModel):
+    """One sweep pick promoted from the lab. Metrics are NOT accepted here:
+    the server recomputes the walk-forward over stored candles so persisted
+    evidence can never be fabricated by the client."""
+
+    strategy_key: str = Field(min_length=3, max_length=100, pattern=r"^[a-z0-9_-]+$")
+    version: str = Field(min_length=1, max_length=32)
+    symbol: str = Field(min_length=1, max_length=80)
+    timeframe_seconds: int = Field(default=60, ge=1, le=86_400)
+    censor_gap_seconds: int = Field(default=60, ge=1, le=86_400)
+    fast_window: int = Field(ge=1, le=200)
+    slow_window: int = Field(ge=2, le=400)
+    volatility_window: int = Field(default=20, ge=1, le=500)
+
+
+class SweepPickEvidence(BaseModel):
+    origin: str
+    symbol: str
+    timeframe_seconds: int
+    censor_gap_seconds: int
+    fast_window: int
+    slow_window: int
+    volatility_window: int
+    max_drawdown_gate: float
+    metrics: BacktestMetrics
+    saved_at: datetime
+
+
+class SweepPickSaveResponse(BaseModel):
+    strategy: StrategyResponse
+    evidence: SweepPickEvidence

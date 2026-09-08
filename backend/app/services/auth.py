@@ -236,3 +236,32 @@ def otpauth_uri(secret: str, label: str = "TradingOS admin", issuer: str = "Trad
         f"otpauth://totp/{quote(label)}?secret={secret}&issuer={quote(issuer)}"
         f"&algorithm=SHA1&digits={_TOTP_DIGITS}&period={_TOTP_PERIOD_SECONDS}"
     )
+
+
+def totp_qr_svg(uri: str) -> str:
+    """Render the otpauth URI as a self-contained QR SVG for authenticator apps.
+
+    Scanning a QR is materially safer than transcribing a 32-character base32
+    secret by hand: one mistyped character silently provisions the wrong key.
+    The QR encodes exactly the provisioning URI (error correction M, the level
+    mainstream authenticators use), so the rendered SVG is equivalent to the
+    secret itself and is therefore returned ONLY inside the provisioning
+    response — never persisted, logged, or re-served later.
+    """
+    import io
+
+    import segno
+
+    buffer = io.BytesIO()
+    segno.make(uri, error="m").save(
+        buffer,
+        kind="svg",
+        scale=4,
+        border=2,
+        dark="#101312",
+        light="#f4f1ea",
+    )
+    svg = buffer.getvalue().decode("utf-8")
+    # Strip the XML declaration so the markup can be inlined directly in HTML.
+    start = svg.find("<svg")
+    return svg[start:] if start >= 0 else svg

@@ -1,12 +1,16 @@
 <!-- Design: The Instrument Room — outcomes are evidence. The page reports what settled, never what was hoped. -->
 <script setup lang="ts">
-import type { GroupStats, TradeAnalytics } from '~/types/trading'
+import type { EquityPoint, GroupStats, SymbolDrilldown, TradeAnalytics } from '~/types/trading'
 
 const api = useTradingApi()
 const { isConnected, events } = useLoopSocket()
 const analytics = ref<TradeAnalytics | null>(null)
 const loading = ref(true)
 const loadError = ref<string | null>(null)
+
+const drilldown = ref<SymbolDrilldown | null>(null)
+const drilldownLoading = ref(false)
+const drilldownError = ref<string | null>(null)
 
 async function loadAnalytics() {
   loading.value = true
@@ -20,10 +24,28 @@ async function loadAnalytics() {
   }
 }
 
+async function openDrilldown(symbol: string) {
+  drilldownError.value = null
+  drilldownLoading.value = true
+  try {
+    drilldown.value = await api.getSymbolDrilldown(symbol)
+  } catch (error) {
+    drilldown.value = null
+    drilldownError.value = error instanceof Error ? error.message : 'The per-symbol ledger could not be read.'
+  } finally {
+    drilldownLoading.value = false
+  }
+  nextTick(() => document.getElementById('symbol-drilldown')?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
+}
+
+function closeDrilldown() {
+  drilldown.value = null
+  drilldownError.value = null
+}
+
 const CurveGeometryWidth = 600
 const CurveGeometryHeight = 220
-const curveGeometry = computed(() => {
-  const points = analytics.value?.equity_curve ?? []
+function curveGeometryFor(points: EquityPoint[]) {
   if (points.length < 2) return null
   const pad = 10
   const min = Math.min(0, ...points.map(p => p.equity))
@@ -37,7 +59,10 @@ const curveGeometry = computed(() => {
   const lastPoint = points[points.length - 1]
   if (!lastPoint) return null
   return { line, area, baseline, endY: y(lastPoint.equity) }
-})
+}
+
+const curveGeometry = computed(() => curveGeometryFor(analytics.value?.equity_curve ?? []))
+const drillCurveGeometry = computed(() => curveGeometryFor(drilldown.value?.equity_curve ?? []))
 
 const maxGroupPnl = computed(() => {
   const groups: GroupStats[] = analytics.value?.by_symbol ?? []
@@ -75,6 +100,19 @@ const kpis = computed(() => {
   ]
 })
 
+const drillKpis = computed(() => {
+  const d = drilldown.value
+  if (!d) return []
+  return [
+    { label: 'NET PNL', value: money(d.net_pnl), tone: d.net_pnl > 0 ? 'pos' : d.net_pnl < 0 ? 'neg' : 'flat' },
+    { label: 'WIN RATE', value: percent(d.win_rate), tone: 'neutral' },
+    { label: 'TRADES', value: `${d.total_trades}`, tone: 'neutral' },
+    { label: 'PROFIT FACTOR', value: d.profit_factor !== null && d.profit_factor !== undefined ? d.profit_factor.toFixed(2) : '—', tone: (d.profit_factor ?? 0) >= 1 ? 'pos' : 'neg' },
+    { label: 'MAX DRAWDOWN', value: `$${d.max_drawdown.toFixed(2)}`, tone: 'neg' },
+    { label: 'AVG TRADE', value: money(d.avg_pnl), tone: (d.avg_pnl ?? 0) > 0 ? 'pos' : 'neg' },
+  ]
+})
+
 onMounted(loadAnalytics)
 
 // Live settlement: when the reconciler books a trade or the loop completes a
@@ -83,6 +121,7 @@ watch(events, (list) => {
   const latest = list[0]
   if (latest && (latest.type === 'execution.trade.settled' || latest.type === 'loop.tick.completed')) {
     loadAnalytics()
+    if (drilldown.value) openDrilldown(drilldown.value.symbol)
   }
 })
 
@@ -156,16 +195,17 @@ useHead({ title: 'TradingOS · Outcome Analytics' })
             <p class="mono micro">BY INSTRUMENT</p>
             <h2>Symbol ledger</h2>
           </div>
+          <span class="mono micro analytics-drill-hint">TAP A ROW TO DRILL DOWN</span>
         </div>
         <div v-if="analytics?.by_symbol?.length" class="group-table">
           <div class="group-row group-row--head"><span>SYMBOL</span><span>TRADES</span><span>WIN</span><span>NET</span><span></span></div>
-          <div v-for="row in analytics.by_symbol" :key="row.group" class="group-row">
+          <button v-for="row in analytics.by_symbol" :key="row.group" type="button" class="group-row group-row--click" :disabled="drilldownLoading" @click="openDrilldown(row.group)">
             <span class="mono">{{ row.group }}</span>
             <span class="mono">{{ row.trades }}</span>
             <span class="mono">{{ percent(row.win_rate) }}</span>
             <span class="mono" :class="row.net_pnl > 0 ? 'pos' : row.net_pnl < 0 ? 'neg' : ''">{{ money(row.net_pnl) }}</span>
             <span class="group-bar"><span :style="{ width: `${(Math.abs(row.net_pnl) / maxGroupPnl) * 100}%` }" :class="row.net_pnl < 0 ? 'group-bar-fill group-bar-fill--neg' : 'group-bar-fill'"></span></span>
-          </div>
+          </button>
         </div>
         <p v-else class="quiet-note desk-pad">No symbols have settled outcomes yet.</p>
       </section>
@@ -202,6 +242,85 @@ useHead({ title: 'TradingOS · Outcome Analytics' })
       </section>
     </div>
 
+    <section v-if="drilldown || drilldownError || drilldownLoading" id="symbol-drilldown" class="setup-card analytics-drilldown">
+      <div class="setup-heading">
+        <div>
+          <p class="mono micro">PER-SYMBOL DRILL-DOWN</p>
+          <h2>{{ drilldown ? `${drilldown.symbol} ledger` : 'Symbol drill-down' }}</h2>
+        </div>
+        <div class="analytics-heading-right">
+          <span v-if="drilldownLoading" class="mono micro">READING…</span>
+          <button v-if="drilldown || drilldownError" class="mini-control" type="button" @click="closeDrilldown">CLOSE</button>
+        </div>
+      </div>
+      <p v-if="drilldownError && !drilldown" class="error-note desk-pad">{{ drilldownError }}</p>
+      <template v-if="drilldown">
+        <section class="kpi-strip kpi-strip--drill" aria-label="Per-symbol headline figures">
+          <div v-for="kpi in drillKpis" :key="kpi.label" class="kpi-cell">
+            <span class="mono micro">{{ kpi.label }}</span>
+            <strong :class="`kpi-value kpi-value--${kpi.tone}`">{{ kpi.value }}</strong>
+          </div>
+        </section>
+        <div class="curve-stage">
+          <svg v-if="drillCurveGeometry" class="curve-svg" :viewBox="`0 0 ${CurveGeometryWidth} ${CurveGeometryHeight}`" preserveAspectRatio="none" role="img" :aria-label="`Cumulative profit and loss for ${drilldown.symbol}`">
+            <defs>
+              <linearGradient id="drill-fill" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stop-color="rgba(131,187,176,.32)" />
+                <stop offset="100%" stop-color="rgba(131,187,176,.02)" />
+              </linearGradient>
+            </defs>
+            <line :x1="10" :y1="drillCurveGeometry.baseline" :x2="CurveGeometryWidth - 10" :y2="drillCurveGeometry.baseline" stroke="rgba(235,232,223,.18)" stroke-dasharray="3 5" stroke-width="1" />
+            <path :d="drillCurveGeometry.area" fill="url(#drill-fill)" />
+            <path :d="drillCurveGeometry.line" fill="none" stroke="#83bbb0" stroke-width="1.6" />
+          </svg>
+          <div v-else class="curve-empty">
+            <span class="empty-glyph">∿</span>
+            <p>Not enough settled trades for this symbol to draw a curve yet.</p>
+          </div>
+        </div>
+        <div class="analytics-grid analytics-grid--drill">
+          <div>
+            <p class="mono micro drill-table-title">DIRECTION</p>
+            <div v-if="drilldown.by_side.length" class="group-table">
+              <div class="group-row group-row--head"><span>SIDE</span><span>TRADES</span><span>WIN</span><span>NET</span></div>
+              <div v-for="row in drilldown.by_side" :key="row.group" class="group-row">
+                <span class="mono">{{ row.group }}</span>
+                <span class="mono">{{ row.trades }}</span>
+                <span class="mono">{{ percent(row.win_rate) }}</span>
+                <span class="mono" :class="row.net_pnl > 0 ? 'pos' : row.net_pnl < 0 ? 'neg' : ''">{{ money(row.net_pnl) }}</span>
+              </div>
+            </div>
+            <p v-else class="quiet-note">No directional splits yet.</p>
+          </div>
+          <div>
+            <p class="mono micro drill-table-title">ORIGIN</p>
+            <div v-if="drilldown.by_strategy.length" class="group-table">
+              <div class="group-row group-row--head"><span>STRATEGY</span><span>TRADES</span><span>WIN</span><span>NET</span></div>
+              <div v-for="row in drilldown.by_strategy" :key="row.group" class="group-row">
+                <span class="mono">{{ row.group }}</span>
+                <span class="mono">{{ row.trades }}</span>
+                <span class="mono">{{ percent(row.win_rate) }}</span>
+                <span class="mono" :class="row.net_pnl > 0 ? 'pos' : row.net_pnl < 0 ? 'neg' : ''">{{ money(row.net_pnl) }}</span>
+              </div>
+            </div>
+            <p v-else class="quiet-note">Manual intents appear here as “manual” once they settle.</p>
+          </div>
+        </div>
+        <div v-if="drilldown.recent.length" class="group-table">
+          <div class="group-row group-row--recent group-row--head"><span>TIME</span><span>SIDE</span><span>ORIGIN</span><span>AMOUNT</span><span>PNL</span><span>OUTCOME</span></div>
+          <div v-for="trade in drilldown.recent.slice(0, 12)" :key="trade.id" class="group-row group-row--recent">
+            <span class="mono">{{ new Date(trade.settled_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) }}</span>
+            <span class="mono">{{ trade.side ?? '—' }}</span>
+            <span>{{ trade.strategy_key ? `${trade.strategy_key} #${trade.strategy_version_id}` : 'MANUAL' }}</span>
+            <span class="mono">{{ trade.amount !== null ? `$${Number(trade.amount).toFixed(2)}` : '—' }}</span>
+            <span class="mono" :class="trade.realized_pnl > 0 ? 'pos' : trade.realized_pnl < 0 ? 'neg' : ''">{{ money(trade.realized_pnl) }}</span>
+            <span :class="['strategy-chip', trade.outcome === 'WIN' ? 'strategy-chip--validated' : trade.outcome === 'LOSS' ? 'strategy-chip--retired' : 'strategy-chip--draft']">{{ trade.outcome }}</span>
+          </div>
+        </div>
+        <p class="quiet-note desk-pad">Drawdown here is computed over {{ drilldown.symbol }}'s own equity slice only — another symbol's hole never shows up in this curve. Showing the {{ Math.min(12, drilldown.recent.length) }} most recent of {{ drilldown.recent.length }} settlements.</p>
+      </template>
+    </section>
+
     <section class="setup-card analytics-recent">
       <div class="setup-heading">
         <div>
@@ -214,7 +333,7 @@ useHead({ title: 'TradingOS · Outcome Analytics' })
         <div class="group-row group-row--recent group-row--head"><span>TIME</span><span>SYMBOL</span><span>SIDE</span><span>ORIGIN</span><span>AMOUNT</span><span>PNL</span><span>OUTCOME</span></div>
         <div v-for="trade in analytics.recent" :key="trade.id" class="group-row group-row--recent">
           <span class="mono">{{ new Date(trade.settled_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) }}</span>
-          <span class="mono">{{ trade.symbol ?? '—' }}</span>
+          <span class="mono"><button type="button" class="symbol-link" :disabled="drilldownLoading" @click="trade.symbol && openDrilldown(trade.symbol)">{{ trade.symbol ?? '—' }}</button></span>
           <span class="mono">{{ trade.side ?? '—' }}</span>
           <span>{{ trade.strategy_key ? `${trade.strategy_key} #${trade.strategy_version_id}` : 'MANUAL' }}</span>
           <span class="mono">{{ trade.amount !== null ? `$${Number(trade.amount).toFixed(2)}` : '—' }}</span>
@@ -226,3 +345,15 @@ useHead({ title: 'TradingOS · Outcome Analytics' })
     </section>
   </div>
 </template>
+
+<style scoped>
+.group-row--click { cursor: pointer; width: 100%; text-align: left; background: none; border: 0; font: inherit; color: inherit; transition: outline .12s ease; }
+.group-row--click:hover:not(:disabled) { outline: 1px solid var(--brass); }
+.analytics-drill-hint { color: var(--quiet); }
+.analytics-drilldown { border-left: 2px solid var(--teal); }
+.kpi-strip--drill { margin: 0 0 8px; }
+.drill-table-title { margin: 0 0 6px; color: var(--quiet); }
+.analytics-grid--drill { margin-bottom: 14px; }
+.symbol-link { background: none; border: 0; padding: 0; font: inherit; color: var(--paper); cursor: pointer; text-decoration: underline dotted rgba(235,232,223,.35); text-underline-offset: 3px; }
+.symbol-link:hover:not(:disabled) { color: var(--teal); }
+</style>

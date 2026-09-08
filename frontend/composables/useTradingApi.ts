@@ -1,5 +1,5 @@
 // TradingOS follows The Instrument Room: guarded, low-key, evidence-first operational design.
-import type { AuditEvent, AuthLogin, AuthSession, BacktestRun, BacktestSweep, BrokerConnection, BrokerCredentialInput, LoopRun, LoopStatus, MarketChart, OrderIntent, PositionSnapshot, ReconciliationRun, ResearchRun, RiskPolicy, StrategyComparison, StrategyDefinition, StrategyEvaluation, StrategyStatusInput, StrategyVersion, SystemState, TotpProvision, TotpStatus, TradeAnalytics, WatchlistItem } from '~/types/trading'
+import type { AuditEvent, AuthLogin, AuthSession, BacktestRun, BacktestSweep, BrokerConnection, BrokerCredentialInput, LoopRun, LoopStatus, MarketChart, OrderIntent, PositionSnapshot, ReconciliationRun, ResearchRun, RiskPolicy, StrategyComparison, StrategyDefinition, StrategyEvaluation, StrategyStatusInput, StrategyVersion, SweepPickSave, SymbolDrilldown, SystemState, TotpProvision, TotpStatus, TradeAnalytics, WatchlistItem } from '~/types/trading'
 
 export function useTradingApi() {
   const config = useRuntimeConfig()
@@ -44,6 +44,7 @@ export function useTradingApi() {
     getLoopStatus: () => request<LoopStatus>('/loop/status'),
     getLoopRuns: () => request<LoopRun[]>('/loop/runs'),
     getTradeAnalytics: () => request<TradeAnalytics>('/analytics/trades'),
+    getSymbolDrilldown: (symbol: string) => request<SymbolDrilldown>(`/analytics/symbols/${encodeURIComponent(symbol)}`),
     getStrategyComparison: () => request<StrategyComparison>('/analytics/strategies/compare'),
     getMarketChart: (symbol: string, timeframeSeconds: number, limit = 120) =>
       request<MarketChart>(`/market/chart?symbol=${encodeURIComponent(symbol)}&timeframe_seconds=${timeframeSeconds}&limit=${limit}`),
@@ -54,6 +55,7 @@ export function useTradingApi() {
     totpStatus: (adminToken: string) => localControl<TotpStatus>('/auth/totp/status', adminToken),
     disableTotp: (adminToken: string) => localControl<TotpStatus>('/auth/totp/disable', adminToken, { method: 'POST' }),
     createStrategy: (adminToken: string, payload: { strategy_key: string; version: string; definition: StrategyDefinition }) => localControl<StrategyVersion>('/strategies', adminToken, { method: 'POST', body: payload }),
+    saveSweepPick: (adminToken: string, payload: { strategy_key: string; version: string; symbol: string; timeframe_seconds: number; censor_gap_seconds: number; fast_window: number; slow_window: number; volatility_window: number }) => localControl<SweepPickSave>('/strategies/from-sweep', adminToken, { method: 'POST', body: payload }),
     updateStrategyStatus: (adminToken: string, strategyId: number, payload: StrategyStatusInput) => localControl<StrategyVersion>(`/strategies/${strategyId}/status`, adminToken, { method: 'PUT', body: payload }),
     evaluateStrategy: (adminToken: string, strategyId: number, payload: { symbol: string; timeframe_seconds: number; censor_gap_seconds: number }) => localControl<StrategyEvaluation>(`/strategies/${strategyId}/evaluate`, adminToken, { method: 'POST', body: payload }),
     pause: () => request<SystemState>('/system/pause', { method: 'POST' }),

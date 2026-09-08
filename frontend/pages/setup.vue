@@ -185,13 +185,19 @@ const isPracticeConnected = computed(() => connection.value?.state === 'CONNECTE
         <button class="setup-action setup-action--quiet" type="button" :disabled="totpBusy || !adminToken.trim()" @click="provisionTotpSecret">{{ totpBusy ? 'WORKING…' : 'PROVISION AUTHENTICATOR SECRET' }}</button>
         <button v-if="totpState?.provisioned" class="setup-action setup-action--quiet pause-control" type="button" :disabled="totpBusy" @click="disableTotpSecret">DISABLE SECRET</button>
       </div>
-      <p class="setup-summary">Provisioning returns the base32 secret and its otpauth URI exactly once — enter them into any TOTP authenticator app, then set <strong>TRADINGOS_TOTP_REQUIRED=true</strong> on the backend to enforce the code at sign-in. Rotation replaces the old secret; disabling makes a required gate fail closed.</p>
+      <p class="setup-summary">Provisioning returns the base32 secret, its otpauth URI, and a scanning QR exactly once — scan the code or type the secret into any TOTP authenticator app, then set <strong>TRADINGOS_TOTP_REQUIRED=true</strong> on the backend to enforce the code at sign-in. Rotation replaces the old secret; disabling makes a required gate fail closed.</p>
       <div v-if="totpProvision" class="setup-warning totp-reveal">
         <span>!</span>
         <div>
           <p><strong>Shown once — store it now.</strong></p>
-          <p class="mono totp-secret">{{ totpProvision.secret }}</p>
-          <p class="mono totp-uri">{{ totpProvision.otpauth_uri }}</p>
+          <div class="totp-provision-grid">
+            <div class="totp-qr" aria-label="Authenticator provisioning QR code" v-html="totpProvision.qr_svg"></div>
+            <div class="totp-provision-text">
+              <p class="totp-hint">Scan with any TOTP authenticator (Google Authenticator, Aegis, 1Password, Raivo). The QR encodes the otpauth URI below — treat a photo of it as the secret itself.</p>
+              <p class="mono totp-secret">{{ totpProvision.secret }}</p>
+              <p class="mono totp-uri">{{ totpProvision.otpauth_uri }}</p>
+            </div>
+          </div>
         </div>
       </div>
     </section>
@@ -202,4 +208,9 @@ const isPracticeConnected = computed(() => connection.value?.state === 'CONNECTE
 .totp-reveal { align-items: flex-start; }
 .totp-secret { font-size: 13px; letter-spacing: .12em; color: var(--paper); margin: 4px 0; }
 .totp-uri { font-size: 10px; color: var(--quiet); margin: 0; overflow-wrap: anywhere; }
+.totp-provision-grid { display: grid; grid-template-columns: auto 1fr; gap: 18px; align-items: start; margin-top: 8px; }
+.totp-qr { background: #f4f1ea; padding: 6px; border: 1px solid rgba(235,232,223,.25); width: 148px; }
+.totp-qr :deep(svg) { display: block; width: 100%; height: auto; }
+.totp-hint { margin: 0 0 8px; font-size: 11px; color: var(--quiet); }
+@media (max-width: 640px) { .totp-provision-grid { grid-template-columns: 1fr; } }
 </style>

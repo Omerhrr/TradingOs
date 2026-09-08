@@ -23,6 +23,140 @@ def _group_label(strategy_key: str | None) -> str:
     return strategy_key if strategy_key else "manual"
 
 
+def _settled_rows(session: Session, symbol: str | None = None) -> list[dict[str, Any]]:
+    """The settled-trade projection every aggregate is built from.
+
+    One ordered query, one row shape: the headline numbers, the equity curve,
+    and the group breakdowns can never disagree because they all start here.
+    """
+    statement = (
+        select(TradeOutcome, OrderRecord, OrderIntent, StrategyVersion)
+        .join(OrderRecord, TradeOutcome.order_record_id == OrderRecord.id)
+        .join(OrderIntent, OrderRecord.order_intent_id == OrderIntent.id)
+        .outerjoin(StrategyVersion, OrderIntent.strategy_version_id == StrategyVersion.id)
+        .order_by(TradeOutcome.settled_at.asc(), TradeOutcome.id.asc())
+    )
+    if symbol is not None:
+        statement = statement.where(OrderIntent.symbol == symbol.upper())
+    return [
+        {
+            "id": outcome.id,
+            "settled_at": outcome.settled_at,
+            "realized_pnl": float(outcome.realized_pnl),
+            "outcome": outcome.outcome,
+            "symbol": intent.symbol,
+            "side": intent.side,
+            "amount": intent.requested_amount,
+            "strategy_version_id": intent.strategy_version_id,
+            "strategy_key": strategy.strategy_key if strategy is not None else None,
+        }
+        for outcome, record, intent, strategy in session.execute(statement).all()
+    ]
+
+
+def _summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Headline KPIs plus the equity curve over one ordered slice of trades."""
+    total = len(rows)
+    wins = sum(1 for row in rows if row["outcome"] == "WIN")
+    losses = sum(1 for row in rows if row["outcome"] == "LOSS")
+    flat = total - wins - losses
+    win_pnls = [row["realized_pnl"] for row in rows if row["realized_pnl"] > 0]
+    loss_pnls = [row["realized_pnl"] for row in rows if row["realized_pnl"] < 0]
+    gross_win = sum(win_pnls)
+    gross_loss = abs(sum(loss_pnls))
+
+    equity = 0.0
+    peak = 0.0
+    max_drawdown = 0.0
+    equity_curve: list[dict[str, Any]] = []
+    for index, row in enumerate(rows, start=1):
+        equity += row["realized_pnl"]
+        peak = max(peak, equity)
+        max_drawdown = max(max_drawdown, peak - equity)
+        equity_curve.append({"index": index, "settled_at": row["settled_at"], "pnl": row["realized_pnl"], "equity": round(equity, 6)})
+
+    def _mean(values: list[float]) -> float | None:
+        return round(sum(values) / len(values), 6) if values else None
+
+    return {
+        "total_trades": total,
+        "wins": wins,
+        "losses": losses,
+        "flat": flat,
+        "win_rate": round(wins / total, 6) if total else None,
+        "net_pnl": round(sum(row["realized_pnl"] for row in rows), 6),
+        "avg_pnl": _mean([row["realized_pnl"] for row in rows]),
+        "avg_win": _mean(win_pnls),
+        "avg_loss": _mean(loss_pnls),
+        # Profit factor: gross profit over gross loss. No losers means the
+        # ratio is undefined (infinite); reporting None keeps charts honest.
+        "profit_factor": round(gross_win / gross_loss, 6) if gross_loss > 0 else None,
+        "max_drawdown": round(max_drawdown, 6),
+        "best_pnl": round(max(row["realized_pnl"] for row in rows), 6) if rows else None,
+        "worst_pnl": round(min(row["realized_pnl"] for row in rows), 6) if rows else None,
+        "equity_curve": equity_curve,
+    }
+
+
+def trade_analytics(session: Session) -> dict[str, Any]:
+    """Build the full analytics payload shown on the outcomes page."""
+    trades = _settled_rows(session)
+
+    return {
+        **_summary(trades),
+        "by_symbol": _group_stats(trades, "symbol"),
+        "by_side": _group_stats(trades, "side"),
+        "by_strategy": _group_stats([{**row, "strategy_key": _group_label(row["strategy_key"])} for row in trades], "strategy_key"),
+        "recent": [
+            {
+                "id": row["id"],
+                "settled_at": row["settled_at"],
+                "symbol": row["symbol"],
+                "side": row["side"],
+                "amount": row["amount"],
+                "strategy_key": row["strategy_key"],
+                "strategy_version_id": row["strategy_version_id"],
+                "realized_pnl": row["realized_pnl"],
+                "outcome": row["outcome"],
+            }
+            for row in reversed(trades[-50:])
+        ],
+    }
+
+
+def symbol_drilldown(session: Session, symbol: str) -> dict[str, Any]:
+    """Per-symbol deep view: the same honest projection, scoped to one instrument.
+
+    Drawdown is computed over this symbol's own equity slice only — a symbol
+    that traded through a hole another instrument dug reports its own dive,
+    not someone else's. Raises ValueError when the symbol has no settled
+    outcomes so the API can answer 404 instead of a wall of zeros.
+    """
+    rows = _settled_rows(session, symbol=symbol)
+    if not rows:
+        raise ValueError(f"No settled outcomes are recorded for {symbol.upper()}.")
+    return {
+        "symbol": symbol.upper(),
+        **_summary(rows),
+        "by_side": _group_stats(rows, "side"),
+        "by_strategy": _group_stats([{**row, "strategy_key": _group_label(row["strategy_key"])} for row in rows], "strategy_key"),
+        "recent": [
+            {
+                "id": row["id"],
+                "settled_at": row["settled_at"],
+                "symbol": row["symbol"],
+                "side": row["side"],
+                "amount": row["amount"],
+                "strategy_key": row["strategy_key"],
+                "strategy_version_id": row["strategy_version_id"],
+                "realized_pnl": row["realized_pnl"],
+                "outcome": row["outcome"],
+            }
+            for row in reversed(rows[-50:])
+        ],
+    }
+
+
 def _group_stats(rows: list[dict[str, Any]], key: str) -> list[dict[str, Any]]:
     buckets: dict[str, list[dict[str, Any]]] = {}
     for row in rows:

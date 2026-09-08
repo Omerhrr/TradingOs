@@ -1,6 +1,6 @@
 <!-- Design: The Instrument Room — the lab proves parameters on stored candles before any version earns risk. -->
 <script setup lang="ts">
-import type { BacktestRun, BacktestSweep, StrategyVersion } from '~/types/trading'
+import type { BacktestRun, BacktestSweep, StrategyVersion, SweepPickSave } from '~/types/trading'
 
 const api = useTradingApi()
 
@@ -33,6 +33,72 @@ const sweepFocus = ref<SweepLens>('total_return')
 const running = ref(false)
 const result = ref<BacktestRun | null>(null)
 const runError = ref<string | null>(null)
+
+const saveKey = ref('')
+const saveVersion = ref('v1')
+const saving = ref(false)
+const savedPick = ref<SweepPickSave | null>(null)
+const saveError = ref<string | null>(null)
+
+function sanitizeKey(raw: string): string {
+  return raw.toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 100)
+}
+
+watch(result, (run) => {
+  savedPick.value = null
+  saveError.value = null
+  if (run) {
+    saveVersion.value = 'v1'
+    saveKey.value = sanitizeKey(`ema-${run.symbol}-${run.params.fast_window}x${run.params.slow_window}`)
+  }
+})
+
+// Evidence honesty check: the desk recomputes the walk-forward at save time,
+// so a mismatch against the runner output means candles arrived in between.
+const savedDrift = computed(() => {
+  const saved = savedPick.value
+  const run = result.value
+  if (!saved || !run) return false
+  return saved.evidence.metrics.trades !== run.metrics.trades
+    || Math.abs(saved.evidence.metrics.total_return - run.metrics.total_return) > 1e-9
+})
+
+async function savePickAsDraft() {
+  const run = result.value
+  if (!run) return
+  const token = adminToken.value.trim()
+  if (!token) { saveError.value = 'The local admin token is required to save the pick. Paste it below; it stays in this tab.'; return }
+  const key = sanitizeKey(saveKey.value)
+  if (key.length < 3) { saveError.value = 'The strategy key needs at least 3 lowercase letters, digits, hyphens or underscores.'; return }
+  if (!saveVersion.value.trim()) { saveError.value = 'Give the draft a version label.'; return }
+  saving.value = true
+  saveError.value = null
+  try {
+    savedPick.value = await api.saveSweepPick(token, {
+      strategy_key: key,
+      version: saveVersion.value.trim(),
+      symbol: run.symbol,
+      timeframe_seconds: run.timeframe_seconds,
+      censor_gap_seconds: run.censor_gap_seconds,
+      fast_window: run.params.fast_window,
+      slow_window: run.params.slow_window,
+      volatility_window: run.params.volatility_window,
+    })
+    window.sessionStorage.setItem('tradingos-local-admin-token', token)
+    await loadStrategies()
+  } catch (error) {
+    const message = error instanceof Error ? error.message : ''
+    saveError.value = message.includes('409')
+      ? 'A strategy with this key and version already exists — bump the version label.'
+      : message.includes('422')
+        ? 'The desk refused the pick: windows must satisfy fast < slow and at least 30 candles must be stored for the symbol.'
+        : message.includes('401')
+          ? 'The admin token was rejected. Check it and try again.'
+          : 'The pick could not be saved as a draft strategy.'
+  } finally {
+    saving.value = false
+  }
+}
 
 const CurveGeometryWidth = 600
 const CurveGeometryHeight = 220
@@ -281,6 +347,38 @@ useHead({ title: 'TradingOS · Backtest Lab' })
       <p class="quiet-note desk-pad">Showing the {{ Math.min(12, result.trades.length) }} most recent of {{ result.trades.length }} simulated trades. Entry/exit are closes one censor gap apart; nothing here touched a broker.</p>
     </section>
 
+    <section v-if="result" class="setup-card setup-card--form">
+      <div class="setup-heading">
+        <div>
+          <p class="mono micro">LAB &rarr; STRATEGY DESK</p>
+          <h2>Save this pick as a draft strategy</h2>
+        </div>
+        <span class="panel-index">EMA {{ result.params.fast_window }}/{{ result.params.slow_window }} · {{ result.symbol }}</span>
+      </div>
+      <p class="quiet-note desk-pad">The desk never trusts numbers echoed back by a browser: saving recomputes the walk-forward over the candles stored right now and persists that as the draft's evidence. The draft stays DRAFT — VALIDATED is still earned only on the Strategy desk.</p>
+      <div class="backtest-inline">
+        <label class="field-token">STRATEGY KEY<span>lowercase letters, digits, - and _</span><input v-model="saveKey" type="text"></label>
+        <label class="field-token">VERSION<span>draft label</span><input v-model="saveVersion" type="text"></label>
+      </div>
+      <p v-if="saveError" class="setup-error">{{ saveError }}</p>
+      <button class="setup-action" type="button" :disabled="saving" @click="savePickAsDraft">{{ saving ? 'RECOMPUTING EVIDENCE…' : 'SAVE AS DRAFT STRATEGY' }}</button>
+      <div v-if="savedPick" class="save-confirmation">
+        <div class="save-confirmation-head">
+          <strong>DRAFT SAVED · #{{ savedPick.strategy.id }} {{ savedPick.strategy.strategy_key }} v{{ savedPick.strategy.version }}</strong>
+          <NuxtLink class="return-link" to="/strategies">OPEN STRATEGY DESK &rarr;</NuxtLink>
+        </div>
+        <div class="save-confirmation-grid mono">
+          <span>SYMBOL {{ savedPick.evidence.symbol }} · {{ savedPick.evidence.timeframe_seconds }}s</span>
+          <span>TRADES {{ savedPick.evidence.metrics.trades }}</span>
+          <span>WIN RATE {{ percent(savedPick.evidence.metrics.win_rate) }}</span>
+          <span>RETURN {{ moneyish(savedPick.evidence.metrics.total_return) }}</span>
+          <span>MAX DD {{ percent(savedPick.evidence.metrics.max_drawdown) }}</span>
+          <span>DD GATE {{ percent(savedPick.evidence.max_drawdown_gate) }}</span>
+        </div>
+        <p v-if="savedDrift" class="save-drift">Candles moved between the run and the save — the draft's stored evidence reflects the newer data, not the figures you just previewed.</p>
+      </div>
+    </section>
+
     <section class="setup-card setup-card--form">
       <div class="setup-heading">
         <div>
@@ -319,7 +417,7 @@ useHead({ title: 'TradingOS · Backtest Lab' })
             </button>
           </template>
         </div>
-        <p class="quiet-note">Tap a cell to load those windows into the runner above. Inverted pairs and candle-starved cells report an em dash. Green deepens with the lens value; red marks negative ones (max-drawdown lens inverts so deeper green is safer).</p>
+        <p class="quiet-note">Tap a cell to load those windows into the runner above, then save the pick as a draft straight from the lab. Inverted pairs and candle-starved cells report an em dash. Green deepens with the lens value; red marks negative ones (max-drawdown lens inverts so deeper green is safer).</p>
       </div>
     </section>
   </div>
@@ -339,4 +437,9 @@ useHead({ title: 'TradingOS · Backtest Lab' })
 .backtest-grid-head { color: var(--quiet); align-self: center; }
 .backtest-cell { border: 1px solid var(--line); padding: 12px 6px; color: var(--paper); font-size: 10px; letter-spacing: .02em; transition: outline .12s ease; }
 .backtest-cell:hover:not(:disabled) { outline: 1px solid var(--brass); }
+.save-confirmation { margin: 0 26px 26px; border: 1px solid rgba(131,187,176,.4); background: rgba(131,187,176,.06); padding: 16px 18px; display: grid; gap: 10px; }
+.save-confirmation-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
+.save-confirmation-head strong { font-family: 'DM Mono', monospace; font-size: 11px; letter-spacing: .08em; color: var(--teal); }
+.save-confirmation-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px 16px; font-size: 10px; letter-spacing: .05em; color: var(--paper); }
+.save-drift { margin: 0; font-size: 11px; color: var(--brass); }
 </style>

@@ -160,3 +160,78 @@ def test_sweep_caps_grid_size(client) -> None:
     response = client.post("/api/v1/backtest/sweep", json={"symbol": SYMBOL, "timeframe_seconds": TIMEFRAME, "censor_gap_seconds": 60, "fast_windows": [4, 6, 8, 10, 12], "slow_windows": [20, 30, 40, 50, 60]}, headers=ADMIN)
     assert response.status_code == 422
     assert "capped" in response.json()["detail"]
+
+
+# ------------------------------------------------------------- sweep pick save
+
+
+def _save_pick(client, **overrides) -> dict:
+    payload = {
+        "strategy_key": "ema-lab-pick",
+        "version": "v1",
+        "symbol": SYMBOL,
+        "timeframe_seconds": TIMEFRAME,
+        "censor_gap_seconds": 60,
+        "fast_window": 8,
+        "slow_window": 34,
+        "volatility_window": 20,
+    }
+    payload.update(overrides)
+    return client.post("/api/v1/strategies/from-sweep", json=payload, headers=ADMIN)
+
+
+def test_save_sweep_pick_creates_draft_with_recomputed_evidence(client) -> None:
+    saved = _save_pick(client)
+    assert saved.status_code == 200
+    body = saved.json()
+    strategy, evidence = body["strategy"], body["evidence"]
+    assert strategy["status"] == "DRAFT"
+    assert strategy["strategy_key"] == "ema-lab-pick"
+    # The pick keeps the standard draft gate, never the sweep's reporting sentinel.
+    assert strategy["definition"]["max_drawdown"] == 0.05
+    assert strategy["definition"]["fast_window"] == 8
+    assert strategy["definition"]["slow_window"] == 34
+    assert evidence["origin"] == "backtest_lab"
+    assert evidence["symbol"] == SYMBOL
+
+    # Evidence is recomputed server-side: it must equal the read-only runner
+    # over the same candles, not whatever a client might have echoed.
+    preview = client.post("/api/v1/backtest/run", json={"definition": {"fast_window": 8, "slow_window": 34, "volatility_window": 20}, "symbol": SYMBOL, "timeframe_seconds": TIMEFRAME, "censor_gap_seconds": 60}, headers=ADMIN)
+    assert preview.status_code == 200
+    assert evidence["metrics"] == preview.json()["metrics"]
+
+    # The draft is a normal strategy: listed, audited, and evaluatable.
+    listed = client.get("/api/v1/strategies")
+    assert any(row["id"] == strategy["id"] for row in listed.json())
+    with SessionLocal() as session:
+        event = session.scalar(select(AuditEvent).where(AuditEvent.event_type == "STRATEGY_DRAFTED_FROM_LAB").order_by(AuditEvent.id.desc()))
+        assert event is not None
+        assert event.payload["strategy_key"] == "ema-lab-pick"
+        assert event.payload["fast_window"] == 8
+    evaluated = client.post(f"/api/v1/strategies/{strategy['id']}/evaluate", json={"symbol": SYMBOL, "timeframe_seconds": TIMEFRAME, "censor_gap_seconds": 60}, headers=ADMIN)
+    assert evaluated.status_code == 200
+    assert evaluated.json()["metrics"]["trades"] == evidence["metrics"]["trades"]
+
+
+def test_save_sweep_pick_rejects_duplicate_key_version(client) -> None:
+    assert _save_pick(client).status_code == 200
+    duplicate = _save_pick(client)
+    assert duplicate.status_code == 409
+    assert "already exists" in duplicate.json()["detail"]
+
+
+def test_save_sweep_pick_rejects_inverted_windows(client) -> None:
+    response = _save_pick(client, fast_window=40, slow_window=8)
+    assert response.status_code == 422
+    assert "smaller" in response.json()["detail"]
+
+
+def test_save_sweep_pick_needs_candles_for_the_symbol(client) -> None:
+    response = _save_pick(client, symbol="NOCANDLES")
+    assert response.status_code == 422
+    assert "30 candles" in response.json()["detail"]
+
+
+def test_save_sweep_pick_requires_admin(client) -> None:
+    response = client.post("/api/v1/strategies/from-sweep", json={"strategy_key": "ema-lab-pick", "version": "v1", "symbol": SYMBOL, "fast_window": 8, "slow_window": 34})
+    assert response.status_code == 401

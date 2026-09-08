@@ -340,6 +340,7 @@ export interface AuthLogin {
 export interface TotpProvision {
   secret: string
   otpauth_uri: string
+  qr_svg: string
 }
 
 export interface TotpStatus {
@@ -401,4 +402,41 @@ export interface BacktestSweep {
   volatility_window: number
   cells: BacktestSweepCell[]
   generated_at: string
+}
+
+export interface SweepPickSave {
+  strategy: StrategyVersion
+  evidence: {
+    origin: string
+    symbol: string
+    timeframe_seconds: number
+    censor_gap_seconds: number
+    fast_window: number
+    slow_window: number
+    volatility_window: number
+    max_drawdown_gate: number
+    metrics: BacktestMetrics
+    saved_at: string
+  }
+}
+
+export interface SymbolDrilldown {
+  symbol: string
+  total_trades: number
+  wins: number
+  losses: number
+  flat: number
+  win_rate: number | null
+  net_pnl: number
+  avg_pnl: number | null
+  avg_win: number | null
+  avg_loss: number | null
+  profit_factor: number | null
+  max_drawdown: number
+  best_pnl: number | null
+  worst_pnl: number | null
+  equity_curve: EquityPoint[]
+  by_side: GroupStats[]
+  by_strategy: GroupStats[]
+  recent: TradeAnalyticsRow[]
 }
