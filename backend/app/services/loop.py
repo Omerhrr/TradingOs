@@ -32,6 +32,7 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings
 from app.models import AccountConfig, AuditEvent, Candle, LoopRun, OrderIntent, RiskPolicy, StrategyStatus, StrategyVersion, SystemState, WatchlistItem
+from app.services.events import publish_event
 from app.services.execution import ExecutionService
 from app.services.strategy import CandlePoint, calculate_features
 from app.services.worker import BrokerWorker
@@ -57,6 +58,7 @@ class LoopEngine:
         run = LoopRun(state="RUNNING", summary={})
         session.add(run)
         session.commit()
+        publish_event("loop.tick.started", {"run_id": run.id})
         try:
             summary = self._tick_body(session, now)
             run.state = "SUCCEEDED"
@@ -64,6 +66,7 @@ class LoopEngine:
             run.finished_at = datetime.now(UTC)
             session.add(run)  # re-attach after any session expiry
             session.commit()
+            publish_event("loop.tick.completed", {"run_id": run.id, "state": run.state, "summary": summary, "finished_at": run.finished_at.isoformat() if run.finished_at else None})
             return run
         except Exception as exc:
             session.rollback()
@@ -75,6 +78,7 @@ class LoopEngine:
             failed.error_message = str(exc)
             failed.finished_at = datetime.now(UTC)
             session.commit()
+            publish_event("loop.tick.failed", {"run_id": failed.id, "state": "FAILED", "error": failed.error_message, "finished_at": failed.finished_at.isoformat() if failed.finished_at else None})
             raise
 
     def _tick_body(self, session: Session, now: datetime) -> dict[str, Any]:
@@ -147,6 +151,7 @@ class LoopEngine:
         if signal not in {"CALL", "PUT"}:
             return outcome
         outcome["signal"] = {"strategy_id": strategy.id, "symbol": watch.symbol, "timeframe_seconds": watch.timeframe_seconds, "candle_open_time": latest_candle.open_time.isoformat(), "signal": signal}
+        publish_event("loop.signal", outcome["signal"])
 
         key = f"loop:{strategy.id}:{watch.symbol}:{watch.timeframe_seconds}:{int(_as_utc(latest_candle.open_time).timestamp())}"
         if session.scalar(select(OrderIntent.id).where(OrderIntent.idempotency_key == key).limit(1)) is not None:
@@ -163,6 +168,7 @@ class LoopEngine:
             duration_minutes=int(definition.get("duration_minutes", 1)),
         )
         outcome["intent"] = {"intent_id": intent.id, "status": intent.status, "reason": decision.reason}
+        publish_event("loop.intent.created", {"intent_id": intent.id, "status": intent.status, "reason": decision.reason, "strategy_id": strategy.id, "symbol": watch.symbol, "side": "CALL" if signal == "CALL" else "PUT"})
         return outcome
 
     def _default_amount(self, session: Session) -> float:

@@ -1,5 +1,5 @@
 // TradingOS follows The Instrument Room: guarded, low-key, evidence-first operational design.
-import type { AuditEvent, BrokerConnection, BrokerCredentialInput, LoopRun, LoopStatus, OrderIntent, PositionSnapshot, ReconciliationRun, ResearchRun, RiskPolicy, StrategyVersion, SystemState, WatchlistItem } from '~/types/trading'
+import type { AuditEvent, BrokerConnection, BrokerCredentialInput, LoopRun, LoopStatus, OrderIntent, PositionSnapshot, ReconciliationRun, ResearchRun, RiskPolicy, StrategyDefinition, StrategyEvaluation, StrategyStatusInput, StrategyVersion, SystemState, TradeAnalytics, WatchlistItem } from '~/types/trading'
 
 export function useTradingApi() {
   const config = useRuntimeConfig()
@@ -29,6 +29,11 @@ export function useTradingApi() {
     getResearchRuns: () => request<ResearchRun[]>('/research/runs'),
     getLoopStatus: () => request<LoopStatus>('/loop/status'),
     getLoopRuns: () => request<LoopRun[]>('/loop/runs'),
+    getTradeAnalytics: () => request<TradeAnalytics>('/analytics/trades'),
+    getStrategyEvaluations: (strategyId: number) => request<StrategyEvaluation[]>(`/strategies/${strategyId}/evaluations`),
+    createStrategy: (adminToken: string, payload: { strategy_key: string; version: string; definition: StrategyDefinition }) => localControl<StrategyVersion>('/strategies', adminToken, { method: 'POST', body: payload }),
+    updateStrategyStatus: (adminToken: string, strategyId: number, payload: StrategyStatusInput) => localControl<StrategyVersion>(`/strategies/${strategyId}/status`, adminToken, { method: 'PUT', body: payload }),
+    evaluateStrategy: (adminToken: string, strategyId: number, payload: { symbol: string; timeframe_seconds: number; censor_gap_seconds: number }) => localControl<StrategyEvaluation>(`/strategies/${strategyId}/evaluate`, adminToken, { method: 'POST', body: payload }),
     pause: () => request<SystemState>('/system/pause', { method: 'POST' }),
     storeBrokerCredentials: (adminToken: string, credentials: BrokerCredentialInput) => localControl<BrokerConnection>('/broker/credentials', adminToken, { method: 'POST', body: credentials }),
     connectPracticeBroker: (adminToken: string) => localControl<BrokerConnection>('/broker/connect', adminToken, { method: 'POST' }),

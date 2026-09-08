@@ -246,3 +246,58 @@ class OrderIntentResponse(BaseModel):
     rationale: dict
     status: str
     created_at: datetime
+
+
+class StrategyStatusUpdateInput(BaseModel):
+    """VALIDATED status is earned only through the evaluation endpoint."""
+
+    status: str = Field(pattern=r"^(DRAFT|RETIRED)$")
+
+
+class TradeAnalyticsRow(BaseModel):
+    id: int
+    settled_at: datetime
+    symbol: str | None
+    side: str | None
+    amount: float | None
+    strategy_key: str | None
+    strategy_version_id: int | None
+    realized_pnl: float
+    outcome: str
+
+
+class EquityPoint(BaseModel):
+    index: int
+    settled_at: datetime
+    pnl: float
+    equity: float
+
+
+class GroupStats(BaseModel):
+    group: str
+    trades: int
+    wins: int
+    losses: int
+    net_pnl: float
+    win_rate: float
+
+
+class TradeAnalyticsResponse(BaseModel):
+    total_trades: int
+    wins: int
+    losses: int
+    flat: int
+    win_rate: float | None
+    net_pnl: float
+    avg_pnl: float | None
+    avg_win: float | None
+    avg_loss: float | None
+    profit_factor: float | None
+    max_drawdown: float
+    best_pnl: float | None
+    worst_pnl: float | None
+    equity_curve: list[EquityPoint]
+    by_symbol: list[GroupStats]
+    by_side: list[GroupStats]
+    by_strategy: list[GroupStats]
+    recent: list[TradeAnalyticsRow]

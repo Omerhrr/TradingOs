@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from app.config import Settings
 from app.models import AccountConfig, AccountMode, AccountSnapshot, AuditEvent, Candle, OrderIntent, OrderRecord, OrderStatus, PositionSnapshot, RiskPolicy, StrategyStatus, StrategyVersion, SystemState, TradeOutcome
 from app.services.broker import BrokerAdapter, BrokerError
+from app.services.events import publish_event
 from app.services.risk import RiskDecision, gate_entry
 
 
@@ -87,4 +88,5 @@ class ExecutionService:
         session.add(AuditEvent(event_type="PRACTICE_ORDER_SUBMITTED", severity="WARNING", message="A risk-authorized PRACTICE order was submitted to the broker.", payload={"intent_id": intent.id, "broker_order_id": response["broker_order_id"]}))
         session.commit()
         session.refresh(record)
+        publish_event("execution.order.submitted", {"order_id": record.id, "intent_id": intent.id, "broker_order_id": record.broker_order_id, "symbol": intent.symbol, "side": intent.side, "amount": intent.requested_amount})
         return record

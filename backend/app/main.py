@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -12,9 +13,11 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.database import Base, SessionLocal, engine, get_session
 from app.models import AIResearchRun, AccountConfig, AccountSnapshot, AuditEvent, Candle, EncryptedBrokerCredential, FeatureSnapshot, LoopRun, MarketAsset, OrderIntent, OrderRecord, PositionSnapshot, ReconciliationRun, RiskPolicy, StrategyEvaluation, StrategyVersion, SystemState, WatchlistItem
-from app.schemas import AccountStateResponse, AuditEventResponse, BrokerConnectionResponse, BrokerCredentialInput, CandleResponse, FeatureResponse, HealthResponse, LoopRunResponse, LoopStatusResponse, MarketAssetResponse, OrderIntentInput, OrderIntentResponse, OrderResponse, PositionResponse, ReconciliationResponse, ResearchRunResponse, RiskPolicyResponse, StrategyCreateInput, StrategyEvaluationInput, StrategyEvaluationResponse, StrategyResponse, TradeResponse, WatchlistItemResponse, WatchlistUpdate
+from app.schemas import AccountStateResponse, AuditEventResponse, BrokerConnectionResponse, BrokerCredentialInput, CandleResponse, FeatureResponse, HealthResponse, LoopRunResponse, LoopStatusResponse, MarketAssetResponse, OrderIntentInput, OrderIntentResponse, OrderResponse, PositionResponse, ReconciliationResponse, ResearchRunResponse, RiskPolicyResponse, StrategyCreateInput, StrategyEvaluationInput, StrategyEvaluationResponse, StrategyResponse, StrategyStatusUpdateInput, TradeAnalyticsResponse, TradeResponse, WatchlistItemResponse, WatchlistUpdate
+from app.services.analytics import trade_analytics
 from app.services.broker import IQAirBrokerAdapter
 from app.services.credentials import BrokerCredentials, CredentialConfigurationError, CredentialVault
+from app.services.events import event_bus, publish_event
 from app.services.worker import BrokerWorker
 from app.services.strategy import evaluate_strategy, persist_features
 from app.services.research import ResearchBudgetExceeded, ResearchService
@@ -45,6 +48,8 @@ async def lifespan(_: FastAPI):
     Base.metadata.create_all(bind=engine)
     with SessionLocal() as session:
         _seed_control_plane(session)
+    # Bind the event bus to this loop so worker threads can reach WebSocket senders.
+    event_bus.attach_loop(asyncio.get_running_loop())
     runtime.start()
     try:
         yield
@@ -185,6 +190,36 @@ def run_ai_research(strategy_id: int | None = None, session: Session = Depends(g
 @app.get(f"{settings.api_prefix}/research/runs", response_model=list[ResearchRunResponse], tags=["research"])
 def list_research_runs(session: Session = Depends(get_session)) -> list[AIResearchRun]:
     return list(session.scalars(select(AIResearchRun).order_by(AIResearchRun.id.desc()).limit(100)))
+
+
+@app.get(f"{settings.api_prefix}/strategies/{{strategy_id}}/evaluations", response_model=list[StrategyEvaluationResponse], tags=["strategies"])
+def list_strategy_evaluations(strategy_id: int, session: Session = Depends(get_session)) -> list[StrategyEvaluation]:
+    """Evaluation history for a strategy version, newest first."""
+    if session.get(StrategyVersion, strategy_id) is None:
+        raise HTTPException(status_code=404, detail="Strategy version does not exist.")
+    return list(session.scalars(select(StrategyEvaluation).where(StrategyEvaluation.strategy_version_id == strategy_id).order_by(StrategyEvaluation.id.desc()).limit(20)))
+
+
+@app.put(f"{settings.api_prefix}/strategies/{{strategy_id}}/status", response_model=StrategyResponse, dependencies=[Depends(_require_local_admin)], tags=["strategies"])
+def update_strategy_status(strategy_id: int, payload: StrategyStatusUpdateInput, session: Session = Depends(get_session)) -> StrategyVersion:
+    """Move a strategy between DRAFT and RETIRED. VALIDATED is earned only by evaluation."""
+    strategy = session.get(StrategyVersion, strategy_id)
+    if strategy is None:
+        raise HTTPException(status_code=404, detail="Strategy version does not exist.")
+    if strategy.status == payload.status:
+        return strategy
+    previous = strategy.status
+    strategy.status = payload.status
+    session.add(AuditEvent(event_type="STRATEGY_STATUS_CHANGED", severity="INFO", message=f"Strategy {strategy.strategy_key} v{strategy.version} moved from {previous} to {payload.status}.", payload={"strategy_id": strategy_id, "from_status": previous, "to_status": payload.status}))
+    session.commit()
+    session.refresh(strategy)
+    return strategy
+
+
+@app.get(f"{settings.api_prefix}/analytics/trades", response_model=TradeAnalyticsResponse, tags=["analytics"])
+def trade_outcome_analytics(session: Session = Depends(get_session)) -> dict:
+    """Read-only projection over settled trade outcomes: KPIs, equity curve, groups."""
+    return trade_analytics(session)
 
 
 @app.get(f"{settings.api_prefix}/orders", response_model=list[OrderResponse], tags=["orders"])
@@ -333,6 +368,7 @@ def pause_system(session: Session = Depends(get_session)) -> AccountStateRespons
     account.system_state = SystemState.PAUSED.value
     session.add(AuditEvent(event_type="SYSTEM_PAUSED", severity="WARNING", message="New exposure is paused by the control plane.", payload={}))
     session.commit()
+    publish_event("system.state_changed", {"system_state": account.system_state})
     return state(session)
 
 
@@ -346,9 +382,50 @@ def resume_system(session: Session = Depends(get_session)) -> AccountStateRespon
     account.system_state = SystemState.ACTIVE.value
     session.add(AuditEvent(event_type="SYSTEM_RESUMED", severity="INFO", message="New exposure resumed against a connected practice broker.", payload={"account_mode": account.mode}))
     session.commit()
+    publish_event("system.state_changed", {"system_state": account.system_state})
     return state(session)
 
 
 @app.post(f"{settings.api_prefix}/mode/enable-real", tags=["system"])
 def enable_real_mode() -> None:
     raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Real mode is hard-disabled in this scaffold. No broker credentials or live execution path are configured.")
+
+
+@app.websocket(f"{settings.api_prefix}/ws/loop")
+async def loop_events_socket(websocket: WebSocket) -> None:
+    """Live loop channel: hello snapshot, then every loop/execution/system event.
+
+    The client may send "ping" to keep intermediaries from idling the socket
+    out; each ping is answered with a pong frame. Disconnects (browser tab
+    closed, network drop) release the subscriber queue immediately.
+    """
+    await websocket.accept()
+    queue = event_bus.subscribe()
+    try:
+        with SessionLocal() as session:
+            snapshot = loop_status(session).model_dump(mode="json")
+        await websocket.send_json({"type": "hello", "payload": snapshot})
+
+        async def sender() -> None:
+            while True:
+                event = await queue.get()
+                await websocket.send_json(event)
+
+        forwarder = asyncio.create_task(sender())
+        try:
+            while True:
+                message = await websocket.receive_text()
+                if message == "ping":
+                    await websocket.send_json({"type": "pong", "payload": {}})
+        except WebSocketDisconnect:
+            pass
+        finally:
+            forwarder.cancel()
+            try:
+                await forwarder
+            except (asyncio.CancelledError, Exception):
+                pass
+    except WebSocketDisconnect:
+        pass
+    finally:
+        event_bus.unsubscribe(queue)

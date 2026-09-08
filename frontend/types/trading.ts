@@ -146,3 +146,93 @@ export interface BrokerCredentialInput {
   email: string
   password: string
 }
+
+export interface StrategyDefinition {
+  kind: string
+  fast_window: number
+  slow_window: number
+  volatility_window: number
+  max_drawdown: number
+  trade_amount?: number
+  duration_minutes?: number
+  [key: string]: unknown
+}
+
+export interface StrategyStatusInput {
+  status: 'DRAFT' | 'RETIRED'
+}
+
+export interface StrategyEvaluation {
+  id: number
+  strategy_version_id: number
+  dataset_start: string
+  dataset_end: string
+  censor_gap_seconds: number
+  metrics: {
+    trades?: number
+    wins?: number
+    win_rate?: number
+    total_return?: number
+    max_drawdown?: number
+    average_trade_return?: number
+    method?: string
+    censor_gap_seconds?: number
+  }
+  accepted: boolean
+  created_at: string
+}
+
+export interface EquityPoint {
+  index: number
+  settled_at: string
+  pnl: number
+  equity: number
+}
+
+export interface GroupStats {
+  group: string
+  trades: number
+  wins: number
+  losses: number
+  net_pnl: number
+  win_rate: number
+}
+
+export interface TradeAnalyticsRow {
+  id: number
+  settled_at: string
+  symbol: string | null
+  side: string | null
+  amount: number | null
+  strategy_key: string | null
+  strategy_version_id: number | null
+  realized_pnl: number
+  outcome: 'WIN' | 'LOSS' | 'FLAT'
+}
+
+export interface TradeAnalytics {
+  total_trades: number
+  wins: number
+  losses: number
+  flat: number
+  win_rate: number | null
+  net_pnl: number
+  avg_pnl: number | null
+  avg_win: number | null
+  avg_loss: number | null
+  profit_factor: number | null
+  max_drawdown: number
+  best_pnl: number | null
+  worst_pnl: number | null
+  equity_curve: EquityPoint[]
+  by_symbol: GroupStats[]
+  by_side: GroupStats[]
+  by_strategy: GroupStats[]
+  recent: TradeAnalyticsRow[]
+}
+
+export interface LoopSocketEvent {
+  type: string
+  ts: string
+  payload: Record<string, unknown>
+}

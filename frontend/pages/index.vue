@@ -3,6 +3,7 @@
 import type { AuditEvent, LoopRun, LoopStatus, OrderIntent, PositionSnapshot, ReconciliationRun, ResearchRun, RiskPolicy, StrategyVersion, SystemState, WatchlistItem } from '~/types/trading'
 
 const api = useTradingApi()
+const { status: socketStatus, events: socketEvents, isConnected } = useLoopSocket()
 const isPausing = ref(false)
 const pauseError = ref<string | null>(null)
 const isTicking = ref(false)
@@ -98,6 +99,50 @@ onMounted(() => {
   adminToken.value = window.sessionStorage.getItem('tradingos-local-admin-token') ?? ''
   window.setInterval(() => { now.value = new Date() }, 30_000)
 })
+
+// Live channel: one inbound event is enough to refresh the affected panels.
+// The page never waits for its 30s poll to learn that a tick settled a trade.
+watch(socketEvents, (list) => {
+  const latest = list[0]
+  if (!latest) return
+  if (latest.type === 'loop.tick.started') {
+    tickNotice.value = 'A loop tick is running — reconciling, watching, gating…'
+    return
+  }
+  if (latest.type === 'loop.tick.completed' || latest.type === 'loop.tick.failed') {
+    tickNotice.value = null
+    void Promise.all([refreshLoopStatus(), refreshLoopRuns(), refreshState(), refreshIntents(), refreshEvents(), refreshReconciliations()])
+    return
+  }
+  if (latest.type === 'execution.trade.settled' || latest.type === 'execution.order.submitted' || latest.type === 'system.state_changed' || latest.type === 'reconciliation.completed') {
+    void Promise.all([refreshState(), refreshIntents(), refreshEvents(), refreshLoopStatus()])
+  }
+})
+
+const socketChipLabel = computed(() => {
+  if (socketStatus.value === 'live') return 'LIVE'
+  if (socketStatus.value === 'connecting') return 'LINKING…'
+  return 'POLLING'
+})
+
+function socketEventNote(type: string, payload: Record<string, unknown>): string {
+  if (type === 'loop.tick.completed') {
+    const summary = (payload.summary ?? {}) as Record<string, unknown>
+    if (summary.skipped) return String(summary.reason ?? 'guards not satisfied')
+    const signals = Array.isArray(summary.signals) ? summary.signals.length : 0
+    const intents = Array.isArray(summary.intents_created) ? summary.intents_created.length : 0
+    return `${signals} signal(s) · ${intents} intent(s) · ${summary.intents_submitted ?? 0} submitted`
+  }
+  if (type === 'loop.tick.failed') return String(payload.error ?? 'tick failed')
+  if (type === 'loop.intent.created') return `#${payload.intent_id} ${payload.symbol ?? ''} ${payload.side ?? ''} → ${payload.status ?? ''}`
+  if (type === 'loop.signal') return `${payload.symbol ?? ''} ${payload.signal ?? ''} on ${payload.timeframe_seconds ?? '?'}s`
+  if (type === 'execution.order.submitted') return `order #${payload.order_id} ${payload.symbol ?? ''} ${payload.side ?? ''} $${Number(payload.amount ?? 0).toFixed(2)}`
+  if (type === 'execution.trade.settled') return `${payload.symbol ?? '—'} settled ${payload.outcome ?? ''} ${Number(payload.pnl ?? 0).toFixed(2)}`
+  if (type === 'reconciliation.completed') return `run #${payload.run_id} ${payload.state ?? ''}`
+  if (type === 'reconciliation.failed') return String(payload.error ?? 'reconciliation failed')
+  if (type === 'system.state_changed') return `system is now ${payload.system_state ?? '?'}`
+  return ''
+}
 </script>
 
 <template>
@@ -117,8 +162,10 @@ onMounted(() => {
         <a class="nav-link" href="#risk"><span>03</span> Risk policy</a>
         <a class="nav-link" href="#research"><span>04</span> Research</a>
         <a class="nav-link" href="#loop"><span>05</span> Strategy loop</a>
-        <a class="nav-link" href="#evidence"><span>06</span> Evidence log</a>
-        <NuxtLink class="nav-link" to="/setup"><span>07</span> Local setup</NuxtLink>
+        <NuxtLink class="nav-link" to="/strategies"><span>06</span> Strategy desk</NuxtLink>
+        <NuxtLink class="nav-link" to="/analytics"><span>07</span> Outcome analytics</NuxtLink>
+        <a class="nav-link" href="#evidence"><span>08</span> Evidence log</a>
+        <NuxtLink class="nav-link" to="/setup"><span>09</span> Local setup</NuxtLink>
       </nav>
 
       <div class="rail-foot">
@@ -275,6 +322,7 @@ onMounted(() => {
               <h3>Autonomous practice loop</h3>
             </div>
             <span :class="['state-chip', `state-chip--${latestLoopRun?.state?.toLowerCase() ?? 'waiting'}`]">{{ latestLoopRun?.state ?? 'WAITING' }} · {{ loopMode }}</span>
+            <span :class="['live-chip', isConnected ? 'live-chip--on' : 'live-chip--off']" :title="`websocket ${socketStatus}`">{{ socketChipLabel }}</span>
           </div>
           <div class="operations-body">
             <dl class="compact-readout">
@@ -304,6 +352,15 @@ onMounted(() => {
               <span class="loop-note">{{ run.error_message ?? run.summary?.reason ?? (run.summary?.skipped ? 'guards not satisfied' : 'clean pass') }}</span>
             </div>
             <div v-if="!loopRuns?.length" class="loop-row loop-row--empty"><span>—</span><span>NO TICKS</span><span>—</span><span>—</span><span>—</span><span>The loop has not run yet in this session.</span></div>
+          </div>
+          <div class="ws-feed" aria-label="Live loop event stream">
+            <p class="mono micro ws-feed-title">LIVE EVENT STREAM<span :class="['ws-dot', isConnected ? 'ws-dot--on' : 'ws-dot--off']"></span></p>
+            <div v-for="(event, index) in socketEvents.slice(0, 6)" :key="`${event.ts}-${index}`" class="ws-row">
+              <span class="mono ws-time">{{ new Date(event.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) }}</span>
+              <span class="mono ws-type">{{ event.type }}</span>
+              <span class="ws-note">{{ socketEventNote(event.type, event.payload) }}</span>
+            </div>
+            <p v-if="!socketEvents.length" class="ws-row ws-row--empty"><span class="mono ws-time">—</span><span class="mono ws-type">IDLE</span><span class="ws-note">{{ isConnected ? 'Channel is open; waiting for the next loop or settlement event.' : 'The live channel is offline — panels fall back to manual refresh.' }}</span></p>
           </div>
           <p class="ledger-contract">Every tick reconciles first, computes the EMA-cross signal on the latest closed candle, and routes it through the same risk gate as manual intents. One candle can produce one intent — never two.</p>
         </section>

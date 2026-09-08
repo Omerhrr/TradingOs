@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.models import AccountConfig, AccountSnapshot, AuditEvent, Candle, LearningEpisode, MarketAsset, OrderRecord, OrderStatus, PositionSnapshot, ReconciliationRun, TradeOutcome, WatchlistItem
 from app.services.broker import BrokerAdapter, BrokerError
+from app.services.events import publish_event
 
 
 def _as_float(value: Any) -> float | None:
@@ -104,12 +105,14 @@ class Reconciler:
                             outcome_name = "WIN" if pnl > 0 else "LOSS" if pnl < 0 else "FLAT"
                             session.add(TradeOutcome(order_record_id=order.id, realized_pnl=pnl, outcome=outcome_name, settled_at=existing.closed_at or now, learning_tags={"position_state": existing.state, "symbol": existing.symbol, "instrument_type": existing.instrument_type}))
                             session.add(LearningEpisode(order_record_id=order.id, episode_type="PRACTICE_TRADE_OUTCOME", conclusion=f"Practice trade settled as {outcome_name}.", evidence={"pnl": pnl, "position_state": existing.state, "symbol": existing.symbol}))
+                            publish_event("execution.trade.settled", {"order_record_id": order.id, "outcome": outcome_name, "pnl": pnl, "symbol": existing.symbol, "position_state": existing.state})
 
             run.state = "SUCCEEDED"
             run.summary = {"assets": len(assets), "watchlist": len(watchlist), "candles_ingested": candle_total, "positions": len(positions)}
             run.finished_at = datetime.now(UTC)
             session.add(AuditEvent(event_type="RECONCILIATION_SUCCEEDED", severity="INFO", message="Practice broker observations reconciled without submitting an order.", payload=run.summary))
             session.commit()
+            publish_event("reconciliation.completed", {"run_id": run.id, "state": run.state, "summary": run.summary})
             return run
         except Exception as exc:
             # The failed transaction may be poisoned (e.g. an IntegrityError);
@@ -125,4 +128,5 @@ class Reconciler:
             failed.finished_at = datetime.now(UTC)
             session.add(AuditEvent(event_type="RECONCILIATION_FAILED", severity="ERROR", message="Broker reconciliation failed; new exposure remains unavailable.", payload={"error_type": type(exc).__name__}))
             session.commit()
+            publish_event("reconciliation.failed", {"run_id": failed.id, "state": "FAILED", "error": failed.error_message})
             raise
