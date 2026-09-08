@@ -1,6 +1,6 @@
 <!-- Design: The Instrument Room — the lab proves parameters on stored candles before any version earns risk. -->
 <script setup lang="ts">
-import type { BacktestRun, BacktestSweep, StrategyVersion, SweepPickSave } from '~/types/trading'
+import type { BacktestRun, BacktestSweep, SavedPickCell, StrategyVersion, SweepPickSave, SweepRunRecord } from '~/types/trading'
 
 const api = useTradingApi()
 
@@ -22,6 +22,13 @@ const sweepSlow = ref('24, 34, 48, 60')
 const sweepRunning = ref(false)
 const sweep = ref<BacktestSweep | null>(null)
 const sweepError = ref<string | null>(null)
+
+// --- Sweep memory: past surfaces stay replayable, saved cells stay marked ---
+const sweepHistory = ref<SweepRunRecord[]>([])
+const historyLoading = ref(false)
+const savedPicks = ref<SavedPickCell[]>([])
+const savedCellKeys = computed(() => new Set(savedPicks.value.map(pick => `${pick.fast_window}:${pick.slow_window}`)))
+const savedCellNotes = computed(() => new Map(savedPicks.value.map(pick => [`${pick.fast_window}:${pick.slow_window}`, pick])))
 const sweepLens = [
   { key: 'total_return', label: 'RETURN' },
   { key: 'win_rate', label: 'WIN RATE' },
@@ -63,6 +70,56 @@ const savedDrift = computed(() => {
     || Math.abs(saved.evidence.metrics.total_return - run.metrics.total_return) > 1e-9
 })
 
+// The pick links back to the remembered sweep surface only when the runner's
+// current result sits on that surface (same symbol, timeframe, censor gap).
+const sweepRunIdForCurrentResult = computed<number | null>(() => {
+  const run = result.value
+  const activeSweep = sweep.value
+  if (!run || !activeSweep?.sweep_run_id) return null
+  const sameSignature = activeSweep.symbol === run.symbol
+    && activeSweep.timeframe_seconds === run.timeframe_seconds
+    && activeSweep.censor_gap_seconds === run.censor_gap_seconds
+  return sameSignature ? activeSweep.sweep_run_id : null
+})
+
+async function loadSweepHistory() {
+  historyLoading.value = true
+  try {
+    sweepHistory.value = await api.getSweepRuns(20)
+  } catch {
+    sweepHistory.value = []
+  } finally {
+    historyLoading.value = false
+  }
+}
+
+async function loadSavedCells() {
+  try {
+    savedPicks.value = await api.getSavedPickCells(symbol.value.trim().toUpperCase() || 'EURUSD', timeframeSeconds.value, censorGapSeconds.value)
+  } catch {
+    savedPicks.value = []
+  }
+}
+
+function reloadSweepRun(record: SweepRunRecord) {
+  sweep.value = {
+    symbol: record.symbol,
+    timeframe_seconds: record.timeframe_seconds,
+    censor_gap_seconds: record.censor_gap_seconds,
+    volatility_window: record.volatility_window,
+    cells: record.cells,
+    generated_at: record.created_at,
+    sweep_run_id: record.id,
+  }
+  sweepFast.value = record.fast_windows.join(', ')
+  sweepSlow.value = record.slow_windows.join(', ')
+}
+
+function bestCellReturn(record: SweepRunRecord): number | null {
+  const values = record.cells.filter(cell => cell.metrics).map(cell => cell.metrics!.total_return)
+  return values.length ? Math.max(...values) : null
+}
+
 async function savePickAsDraft() {
   const run = result.value
   if (!run) return
@@ -83,9 +140,11 @@ async function savePickAsDraft() {
       fast_window: run.params.fast_window,
       slow_window: run.params.slow_window,
       volatility_window: run.params.volatility_window,
+      sweep_run_id: sweepRunIdForCurrentResult.value,
     })
     window.sessionStorage.setItem('tradingos-local-admin-token', token)
     await loadStrategies()
+    void loadSavedCells()
   } catch (error) {
     const message = error instanceof Error ? error.message : ''
     saveError.value = message.includes('409')
@@ -225,6 +284,8 @@ async function runSweep() {
       volatility_window: customVol.value,
     })
     window.sessionStorage.setItem('tradingos-local-admin-token', token)
+    void loadSavedCells()
+    void loadSweepHistory()
   } catch (error) {
     sweepError.value = error instanceof Error ? error.message : 'The sweep could not be completed.'
   } finally {
@@ -243,7 +304,12 @@ function moneyish(value: number): string {
 onMounted(() => {
   adminToken.value = window.sessionStorage.getItem('tradingos-local-admin-token') ?? ''
   loadStrategies()
+  void loadSweepHistory()
+  void loadSavedCells()
 })
+
+// A new sweep signature (symbol / timeframe / censor gap) needs fresh markers.
+watch([symbol, timeframeSeconds, censorGapSeconds], () => { void loadSavedCells() })
 
 useHead({ title: 'TradingOS · Backtest Lab' })
 </script>
@@ -374,6 +440,8 @@ useHead({ title: 'TradingOS · Backtest Lab' })
           <span>RETURN {{ moneyish(savedPick.evidence.metrics.total_return) }}</span>
           <span>MAX DD {{ percent(savedPick.evidence.metrics.max_drawdown) }}</span>
           <span>DD GATE {{ percent(savedPick.evidence.max_drawdown_gate) }}</span>
+          <span v-if="savedPick.sweep_pick?.sweep_run_id">CELL LINKED TO SWEEP #{{ savedPick.sweep_pick.sweep_run_id }}</span>
+          <span v-else>CELL MEMORY RECORDED</span>
         </div>
         <p v-if="savedDrift" class="save-drift">Candles moved between the run and the save — the draft's stored evidence reflects the newer data, not the figures you just previewed.</p>
       </div>
@@ -405,7 +473,8 @@ useHead({ title: 'TradingOS · Backtest Lab' })
               v-for="slow in sweepGrid.slowValues"
               :key="`${fast}:${slow}`"
               type="button"
-              class="backtest-cell mono"
+              :class="['backtest-cell', 'mono', { 'backtest-cell--saved': savedCellKeys.has(`${fast}:${slow}`) }]"
+              :title="savedCellKeys.has(`${fast}:${slow}`) ? `Already saved as ${savedCellNotes.get(`${fast}:${slow}`)?.strategy_key} v${savedCellNotes.get(`${fast}:${slow}`)?.version}` : undefined"
               :style="cellStyle(sweepGrid.byPair.get(`${fast}:${slow}`) ?? { metrics: null, error: null })"
               :disabled="running"
               @click="runBacktest({ fast, slow })"
@@ -414,11 +483,34 @@ useHead({ title: 'TradingOS · Backtest Lab' })
                 {{ sweepFocus === 'max_drawdown' ? percent(sweepGrid.byPair.get(`${fast}:${slow}`)?.metrics?.max_drawdown) : sweepFocus === 'win_rate' ? percent(sweepGrid.byPair.get(`${fast}:${slow}`)?.metrics?.win_rate) : moneyish(sweepGrid.byPair.get(`${fast}:${slow}`)?.metrics?.total_return ?? 0) }}
               </template>
               <template v-else>—</template>
+              <span v-if="savedCellKeys.has(`${fast}:${slow}`)" class="saved-dot" aria-hidden="true">●</span>
             </button>
           </template>
         </div>
-        <p class="quiet-note">Tap a cell to load those windows into the runner above, then save the pick as a draft straight from the lab. Inverted pairs and candle-starved cells report an em dash. Green deepens with the lens value; red marks negative ones (max-drawdown lens inverts so deeper green is safer).</p>
+        <p class="quiet-note">Tap a cell to load those windows into the runner above, then save the pick as a draft straight from the lab. Inverted pairs and candle-starved cells report an em dash. Green deepens with the lens value; red marks negative ones (max-drawdown lens inverts so deeper green is safer). A ● dot marks a cell already promoted to a draft for this exact surface.</p>
       </div>
+    </section>
+
+    <section class="setup-card setup-card--form">
+      <div class="setup-heading">
+        <div>
+          <p class="mono micro">SWEEP MEMORY · LAST 20 SURFACES</p>
+          <h2>Every grid is remembered — picks recall their cell</h2>
+        </div>
+        <button class="setup-action setup-action--quiet" type="button" :disabled="historyLoading" @click="loadSweepHistory">{{ historyLoading ? 'READING…' : 'REFRESH HISTORY' }}</button>
+      </div>
+      <p class="quiet-note desk-pad">The lab stays read-only; the desk keeps a bounded memory of the surfaces it swept. Reload one to re-open its heatmap, and a pick saved from it will carry the exact (fast × slow) cell in its provenance — visible on the Strategy desk and in every evidence export.</p>
+      <div v-if="sweepHistory.length" class="sweep-history desk-pad">
+        <div v-for="record in sweepHistory.slice(0, 8)" :key="record.id" class="sweep-history-row">
+          <span class="mono">#{{ record.id }}</span>
+          <span class="mono">{{ record.symbol }} · {{ record.timeframe_seconds }}s</span>
+          <span class="mono">{{ record.fast_windows.length }}×{{ record.slow_windows.length }} CELLS</span>
+          <span class="mono" :class="(bestCellReturn(record) ?? 0) >= 0 ? 'pos' : 'neg'">BEST {{ bestCellReturn(record) === null ? '—' : moneyish(bestCellReturn(record)!) }}</span>
+          <span class="mono sweep-history-when">{{ new Date(record.created_at).toLocaleString('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) }}</span>
+          <button class="mini-control" type="button" @click="reloadSweepRun(record)">RELOAD</button>
+        </div>
+      </div>
+      <p v-else class="quiet-note desk-pad">No sweeps recorded yet — run one above and it will be remembered here, newest first, with the grid capped at 24 surfaces.</p>
     </section>
   </div>
 </template>
@@ -438,6 +530,11 @@ useHead({ title: 'TradingOS · Backtest Lab' })
 .backtest-cell { border: 1px solid var(--line); padding: 12px 6px; color: var(--paper); font-size: 10px; letter-spacing: .02em; transition: outline .12s ease; }
 .backtest-cell:hover:not(:disabled) { outline: 1px solid var(--brass); }
 .save-confirmation { margin: 0 26px 26px; border: 1px solid rgba(131,187,176,.4); background: rgba(131,187,176,.06); padding: 16px 18px; display: grid; gap: 10px; }
+.backtest-cell--saved { outline: 1px solid var(--brass); }
+.saved-dot { display: block; color: var(--brass); font-size: 8px; line-height: 1; margin-top: 4px; }
+.sweep-history { display: grid; gap: 0; margin: 0 26px 26px; }
+.sweep-history-row { display: grid; grid-template-columns: 56px minmax(140px, 1fr) 96px 110px minmax(130px, .8fr) auto; gap: 12px; align-items: center; padding: 11px 0; border-top: 1px solid var(--line); color: var(--paper); font-size: 11px; }
+.sweep-history-when { color: var(--quiet); }
 .save-confirmation-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
 .save-confirmation-head strong { font-family: 'DM Mono', monospace; font-size: 11px; letter-spacing: .08em; color: var(--teal); }
 .save-confirmation-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px 16px; font-size: 10px; letter-spacing: .05em; color: var(--paper); }

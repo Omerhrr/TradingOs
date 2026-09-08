@@ -37,6 +37,11 @@ class Settings(BaseSettings):
     practice_execution_enabled: bool = False
     real_execution_enabled: bool = False
     loop_enabled: bool = False
+    # Guard alerting: a guard trip raises a deduplicated alert (cooldown window
+    # collapses repeated trips), fans it out over the WS bus, and optionally
+    # POSTs it to an external webhook. Alerting must never break trading ops.
+    alert_cooldown_seconds: int = Field(default=60, ge=5, le=3_600)
+    alert_webhook_url: str | None = None
     ai_enabled: bool = False
     ai_model: str = "gpt-5-mini"
     ai_base_url: str | None = None

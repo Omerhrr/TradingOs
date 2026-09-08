@@ -527,6 +527,53 @@ class BacktestSweepResponse(BaseModel):
     volatility_window: int
     cells: list[BacktestSweepCell]
     generated_at: datetime
+    sweep_run_id: int | None = None
+
+
+class SweepRunRecordResponse(BaseModel):
+    """One remembered lab sweep surface: grid, cells, and when it ran."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    symbol: str
+    timeframe_seconds: int
+    censor_gap_seconds: int
+    volatility_window: int
+    fast_windows: list[int]
+    slow_windows: list[int]
+    cells: list[BacktestSweepCell]
+    created_at: datetime
+
+
+class SweepPickRecordResponse(BaseModel):
+    """Cell memory: the exact lab cell a draft strategy was promoted from."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    strategy_version_id: int
+    sweep_run_id: int | None = None
+    symbol: str
+    timeframe_seconds: int
+    censor_gap_seconds: int
+    fast_window: int
+    slow_window: int
+    volatility_window: int
+    metrics: dict
+    created_at: datetime
+
+
+class SavedPickCellResponse(BaseModel):
+    """A saved cell in one sweep signature, for heatmap markers."""
+
+    fast_window: int
+    slow_window: int
+    strategy_version_id: int
+    strategy_key: str
+    version: str
+    status: str
+    saved_at: datetime
 
 
 class StrategyFromSweepInput(BaseModel):
@@ -542,6 +589,7 @@ class StrategyFromSweepInput(BaseModel):
     fast_window: int = Field(ge=1, le=200)
     slow_window: int = Field(ge=2, le=400)
     volatility_window: int = Field(default=20, ge=1, le=500)
+    sweep_run_id: int | None = None
 
 
 class SweepPickEvidence(BaseModel):
@@ -560,3 +608,57 @@ class SweepPickEvidence(BaseModel):
 class SweepPickSaveResponse(BaseModel):
     strategy: StrategyResponse
     evidence: SweepPickEvidence
+    sweep_pick: SweepPickRecordResponse | None = None
+
+
+class StrategyIdentityResponse(BaseModel):
+    """Identity block of an evidence bundle (definition lives beside it)."""
+
+    id: int
+    strategy_key: str
+    version: str
+    status: str
+    created_at: datetime
+
+
+class StrategyEvidenceResponse(BaseModel):
+    """The honest per-strategy evidence bundle behind the CSV/PDF exports."""
+
+    generated_at: datetime
+    strategy: StrategyIdentityResponse
+    definition: dict
+    evaluation: dict
+    lab_provenance: list[SweepPickRecordResponse]
+    origin: str
+    live: dict
+    activity: dict
+    trades: list[dict]
+
+
+class AlertResponse(BaseModel):
+    """One operable operational alert with its acknowledgement state."""
+
+    id: int
+    code: str
+    severity: str
+    message: str
+    payload: dict
+    occurrences: int
+    acknowledged: bool
+    acknowledged_at: datetime | None = None
+    created_at: datetime
+    last_seen_at: datetime
+
+
+class AlertListResponse(BaseModel):
+    alerts: list[AlertResponse]
+    unacknowledged: int
+
+
+class AlertUnreadResponse(BaseModel):
+    unacknowledged: int
+
+
+class AlertAckResponse(BaseModel):
+    acknowledged: list[int]
+    auto: bool = False

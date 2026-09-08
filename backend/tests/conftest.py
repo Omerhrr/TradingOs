@@ -56,6 +56,7 @@ def _restore_pristine_world():
     from app.models import (
         AccountConfig,
         AccountSnapshot,
+        Alert,
         AuditEvent,
         Candle,
         EncryptedBrokerCredential,
@@ -71,6 +72,8 @@ def _restore_pristine_world():
         StrategyEvaluation,
         StrategyVersion,
         SystemState,
+        SweepPickRecord,
+        SweepRunRecord,
         TradeOutcome,
         TwoFactorSecret,
     )
@@ -80,7 +83,8 @@ def _restore_pristine_world():
         for model in (OrderIntent, OrderRecord, PositionSnapshot, TradeOutcome,
                       LearningEpisode, AccountSnapshot, MarketAsset, FeatureSnapshot,
                       Candle, ReconciliationRun, LoopRun, StrategyEvaluation, StrategyVersion, RiskPolicy,
-                      AccountConfig, EncryptedBrokerCredential, TwoFactorSecret, AuditEvent):
+                      AccountConfig, EncryptedBrokerCredential, TwoFactorSecret, AuditEvent,
+                      SweepPickRecord, SweepRunRecord, Alert):
             session.query(model).delete()
         if session.scalar(select(AccountConfig.id).limit(1)) is None:
             session.add(AccountConfig(account_label="Primary account", mode="PRACTICE",

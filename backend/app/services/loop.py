@@ -32,6 +32,7 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings
 from app.models import AccountConfig, AuditEvent, Candle, LoopRun, OrderIntent, RiskPolicy, StrategyStatus, StrategyVersion, SystemState, WatchlistItem
+from app.services import alerts as alerting
 from app.services.events import publish_event
 from app.services.execution import ExecutionService
 from app.services.strategy import CandlePoint, calculate_features
@@ -78,13 +79,34 @@ class LoopEngine:
             failed.error_message = str(exc)
             failed.finished_at = datetime.now(UTC)
             session.commit()
+            # A failed tick is exactly what alerting exists for: the loop did
+            # not just skip work, it broke. Raise before surfacing to callers.
+            try:
+                alerting.raise_alert(session, self.settings, code=alerting.TICK_FAILED, severity="ERROR", message=f"A loop tick failed: {exc}", payload={"run_id": failed.id, "error_type": type(exc).__name__})
+            except Exception:  # noqa: BLE001 — alerting must never mask the failure
+                pass
             publish_event("loop.tick.failed", {"run_id": failed.id, "state": "FAILED", "error": failed.error_message, "finished_at": failed.finished_at.isoformat() if failed.finished_at else None})
             raise
 
     def _tick_body(self, session: Session, now: datetime) -> dict[str, Any]:
         guards = self._guards(session)
         if guards:
-            return {"skipped": True, "reason": guards}
+            # A tripped guard is the system working as designed, but the
+            # operator must hear about it. raise_alert deduplicates within the
+            # cooldown window so a runtime-driven loop cannot flood the ledger.
+            try:
+                alert = alerting.raise_alert(session, self.settings, code=alerting.GUARD_TRIPPED, severity="WARNING", message=guards, payload={"skipped": True})
+                guard_alert = {"alert_id": alert.id, "occurrences": alert.occurrences}
+            except Exception:  # noqa: BLE001 — alerting must never break the tick
+                guard_alert = None
+            return {"skipped": True, "reason": guards, "guard_alert": guard_alert}
+        # Guards passed: any standing guard alert describes a condition that
+        # no longer holds, so it self-resolves instead of training the operator
+        # to ignore pages.
+        try:
+            alerting.resolve_guard_alerts(session, self.settings)
+        except Exception:  # noqa: BLE001
+            pass
 
         # Always reconcile first: signals must be computed on fresh candles and
         # settled outcomes must be visible before new exposure is considered.
@@ -103,6 +125,18 @@ class LoopEngine:
                     intents_created.append(outcome["intent"])
 
         submitted, submit_errors = self._submit_loop_intents(session)
+        for error in submit_errors:
+            try:
+                alerting.raise_alert(
+                    session,
+                    self.settings,
+                    code=alerting.SUBMIT_ERROR,
+                    severity="ERROR",
+                    message=f"Submitting loop intent #{error['intent_id']} failed: {error['error_type']}: {error['detail']}",
+                    payload=error,
+                )
+            except Exception:  # noqa: BLE001 — alerting must never break the tick
+                pass
 
         summary = {
             "skipped": False,

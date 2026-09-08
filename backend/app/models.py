@@ -322,3 +322,70 @@ class TwoFactorSecret(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     rotated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class Alert(Base):
+    """An operable operational alert raised by a loop guard or control-plane failure.
+
+    Guards trip on every tick while a condition holds, so raising is deduplicated:
+    within the cooldown window an existing unacknowledged alert with the same code
+    is refreshed (``occurrences`` grows, ``last_seen_at`` moves) instead of spawning
+    a new row. A guard alert auto-resolves when a later tick passes its guard.
+    """
+
+    __tablename__ = "alerts"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    code: Mapped[str] = mapped_column(String(64), index=True)
+    severity: Mapped[str] = mapped_column(String(16), default="WARNING")
+    message: Mapped[str] = mapped_column(Text)
+    payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    occurrences: Mapped[int] = mapped_column(Integer, default=1)
+    acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class SweepRunRecord(Base):
+    """Persisted memory of one lab sweep so past parameter surfaces can be re-opened.
+
+    Written by the API route after a successful run — the runner service itself
+    stays a pure projection. Rows are pruned to a bounded ring so a busy lab
+    cannot grow this table without limit.
+    """
+
+    __tablename__ = "sweep_run_records"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    symbol: Mapped[str] = mapped_column(String(80), index=True)
+    timeframe_seconds: Mapped[int] = mapped_column(Integer)
+    censor_gap_seconds: Mapped[int] = mapped_column(Integer)
+    volatility_window: Mapped[int] = mapped_column(Integer)
+    fast_windows: Mapped[list] = mapped_column(JSON, default=list)
+    slow_windows: Mapped[list] = mapped_column(JSON, default=list)
+    cells: Mapped[list] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
+class SweepPickRecord(Base):
+    """Cell memory for a draft strategy promoted from the lab.
+
+    One row per saved pick: the exact (fast, slow) cell, the sweep context it
+    came from, and the recomputed evidence snapshot at save time. A strategy
+    exported as evidence therefore always carries its provenance with it.
+    """
+
+    __tablename__ = "sweep_pick_records"
+    __table_args__ = (UniqueConstraint("strategy_version_id", name="uq_sweep_pick_strategy"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    strategy_version_id: Mapped[int] = mapped_column(ForeignKey("strategy_versions.id"), index=True)
+    sweep_run_id: Mapped[int | None] = mapped_column(ForeignKey("sweep_run_records.id"), nullable=True)
+    symbol: Mapped[str] = mapped_column(String(80), index=True)
+    timeframe_seconds: Mapped[int] = mapped_column(Integer)
+    censor_gap_seconds: Mapped[int] = mapped_column(Integer)
+    fast_window: Mapped[int] = mapped_column(Integer)
+    slow_window: Mapped[int] = mapped_column(Integer)
+    volatility_window: Mapped[int] = mapped_column(Integer)
+    metrics: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

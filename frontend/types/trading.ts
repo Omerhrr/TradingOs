@@ -402,6 +402,81 @@ export interface BacktestSweep {
   volatility_window: number
   cells: BacktestSweepCell[]
   generated_at: string
+  sweep_run_id?: number | null
+}
+
+export interface SweepRunRecord {
+  id: number
+  symbol: string
+  timeframe_seconds: number
+  censor_gap_seconds: number
+  volatility_window: number
+  fast_windows: number[]
+  slow_windows: number[]
+  cells: BacktestSweepCell[]
+  created_at: string
+}
+
+export interface SweepPickRecord {
+  id: number
+  strategy_version_id: number
+  sweep_run_id: number | null
+  symbol: string
+  timeframe_seconds: number
+  censor_gap_seconds: number
+  fast_window: number
+  slow_window: number
+  volatility_window: number
+  metrics: BacktestMetrics
+  created_at: string
+}
+
+export interface SavedPickCell {
+  fast_window: number
+  slow_window: number
+  strategy_version_id: number
+  strategy_key: string
+  version: string
+  status: string
+  saved_at: string
+}
+
+export interface EvidenceStrategyIdentity {
+  id: number
+  strategy_key: string
+  version: string
+  status: string
+  created_at: string
+}
+
+export interface StrategyEvidence {
+  generated_at: string
+  strategy: EvidenceStrategyIdentity
+  definition: Record<string, unknown>
+  evaluation: Record<string, unknown>
+  lab_provenance: SweepPickRecord[]
+  origin: string
+  live: Record<string, unknown>
+  activity: Record<string, unknown>
+  trades: Array<Record<string, unknown>>
+}
+
+export interface AlertRow {
+  id: number
+  code: string
+  severity: string
+  message: string
+  payload: Record<string, unknown>
+  occurrences: number
+  acknowledged: boolean
+  acknowledged_at: string | null
+  created_at: string
+  last_seen_at: string
+}
+
+export interface AlertList {
+  alerts: AlertRow[]
+  unacknowledged: number
 }
 
 export interface SweepPickSave {
@@ -418,6 +493,7 @@ export interface SweepPickSave {
     metrics: BacktestMetrics
     saved_at: string
   }
+  sweep_pick?: SweepPickRecord | null
 }
 
 export interface SymbolDrilldown {

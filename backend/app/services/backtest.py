@@ -23,10 +23,11 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import AuditEvent, Candle, StrategyVersion
+from app.models import AuditEvent, Candle, StrategyVersion, SweepPickRecord, SweepRunRecord
 from app.services.strategy import walk_forward_detail
 
 MAX_SWEEP_CELLS = 24
+MAX_SWEEP_RUN_RECORDS = 24  # bounded memory: the lab keeps the newest surfaces
 DEFAULT_MAX_DRAWDOWN = 1.0  # sweeps report; nothing here is ever "accepted"
 DRAFT_MAX_DRAWDOWN = 0.05  # a saved pick starts life as a draft with the standard gate
 
@@ -110,6 +111,92 @@ def run_sweep(
     }
 
 
+def record_sweep_run(session: Session, sweep_result: dict[str, Any]) -> SweepRunRecord:
+    """Persist one lab sweep surface so past parameter grids can be re-opened.
+
+    Called by the API route AFTER ``run_sweep`` returns: the runner service
+    itself remains a pure projection (its zero-persistence contract is tested),
+    while the operator's lab activity gets a bounded, replayable history.
+    """
+    record = SweepRunRecord(
+        symbol=sweep_result["symbol"],
+        timeframe_seconds=sweep_result["timeframe_seconds"],
+        censor_gap_seconds=sweep_result["censor_gap_seconds"],
+        volatility_window=sweep_result["volatility_window"],
+        fast_windows=sorted({cell["fast_window"] for cell in sweep_result["cells"]}),
+        slow_windows=sorted({cell["slow_window"] for cell in sweep_result["cells"]}),
+        cells=sweep_result["cells"],
+    )
+    session.add(record)
+    session.commit()
+    session.refresh(record)
+    # Prune to a bounded ring: newest surfaces stay, the past ages out.
+    stale_ids = list(session.scalars(
+        select(SweepRunRecord.id).order_by(SweepRunRecord.id.desc()).offset(MAX_SWEEP_RUN_RECORDS).limit(100)
+    ))
+    if stale_ids:
+        session.query(SweepRunRecord).where(SweepRunRecord.id.in_(stale_ids)).delete(synchronize_session=False)
+        session.commit()
+    return record
+
+
+def sweep_run_history(session: Session, limit: int = 20) -> list[SweepRunRecord]:
+    """Recent sweep surfaces, newest first, for the lab's history card."""
+    return list(session.scalars(select(SweepRunRecord).order_by(SweepRunRecord.id.desc()).limit(limit)))
+
+
+def strategy_sweep_picks(session: Session, strategy_id: int) -> list[SweepPickRecord]:
+    """Cell memory for one strategy: which lab cell(s) it was promoted from."""
+    if session.get(StrategyVersion, strategy_id) is None:
+        raise ValueError(f"Strategy version {strategy_id} does not exist.")
+    return list(session.scalars(select(SweepPickRecord).where(SweepPickRecord.strategy_version_id == strategy_id).order_by(SweepPickRecord.id)))
+
+
+def serialize_pick_record(pick: SweepPickRecord) -> dict[str, Any]:
+    """The wire shape for cell memory, shared by the pick response and evidence bundles."""
+    return {
+        "id": pick.id,
+        "strategy_version_id": pick.strategy_version_id,
+        "sweep_run_id": pick.sweep_run_id,
+        "symbol": pick.symbol,
+        "timeframe_seconds": pick.timeframe_seconds,
+        "censor_gap_seconds": pick.censor_gap_seconds,
+        "fast_window": pick.fast_window,
+        "slow_window": pick.slow_window,
+        "volatility_window": pick.volatility_window,
+        "metrics": pick.metrics or {},
+        "created_at": pick.created_at,
+    }
+
+
+def saved_pick_cells(session: Session, symbol: str, timeframe_seconds: int, censor_gap_seconds: int) -> list[dict[str, Any]]:
+    """Saved (fast, slow) cells for one sweep signature, for heatmap markers.
+
+    A cell that already became a draft shows up here so the operator cannot
+    re-promote the same surface twice without noticing.
+    """
+    rows = session.execute(
+        select(SweepPickRecord, StrategyVersion)
+        .join(StrategyVersion, SweepPickRecord.strategy_version_id == StrategyVersion.id)
+        .where(SweepPickRecord.symbol == symbol.upper())
+        .where(SweepPickRecord.timeframe_seconds == timeframe_seconds)
+        .where(SweepPickRecord.censor_gap_seconds == censor_gap_seconds)
+        .order_by(SweepPickRecord.id)
+    ).all()
+    return [
+        {
+            "fast_window": pick.fast_window,
+            "slow_window": pick.slow_window,
+            "strategy_version_id": strategy.id,
+            "strategy_key": strategy.strategy_key,
+            "version": strategy.version,
+            "status": strategy.status,
+            "saved_at": pick.created_at,
+        }
+        for pick, strategy in rows
+    ]
+
+
 def save_sweep_pick(
     session: Session,
     *,
@@ -121,6 +208,7 @@ def save_sweep_pick(
     fast_window: int,
     slow_window: int,
     volatility_window: int,
+    sweep_run_id: int | None = None,
 ) -> dict[str, Any]:
     """Promote one sweep pick into a DRAFT strategy version with honest evidence.
 
@@ -131,6 +219,10 @@ def save_sweep_pick(
     operator sees the recomputed numbers, not the ones they clicked on. The
     draft starts at the standard 0.05 max-drawdown gate — the sweep's reporting
     sentinel (1.0) must never leak into an acceptance threshold.
+
+    The pick remembers its cell: a ``SweepPickRecord`` pins the exact (fast,
+    slow) pair, the sweep context, and the recomputed evidence snapshot, and
+    optionally links back to the persisted sweep surface it came from.
     """
     fast_window = int(fast_window)
     slow_window = int(slow_window)
@@ -162,6 +254,12 @@ def save_sweep_pick(
     except ValueError as exc:
         raise SweepPickRejected(str(exc)) from exc
 
+    sweep_run: SweepRunRecord | None = None
+    if sweep_run_id is not None:
+        sweep_run = session.get(SweepRunRecord, sweep_run_id)
+        if sweep_run is None:
+            raise SweepPickRejected("The referenced sweep run does not exist; it may have aged out of the bounded history.")
+
     metrics = detail["metrics"]
     evidence = {
         "origin": "backtest_lab",
@@ -178,6 +276,19 @@ def save_sweep_pick(
     strategy = StrategyVersion(strategy_key=strategy_key, version=version, definition=definition)
     strategy.validation_summary = evidence
     session.add(strategy)
+    session.flush()  # the pick record needs the strategy id
+    pick_record = SweepPickRecord(
+        strategy_version_id=strategy.id,
+        sweep_run_id=sweep_run.id if sweep_run is not None else None,
+        symbol=symbol.upper(),
+        timeframe_seconds=timeframe_seconds,
+        censor_gap_seconds=censor_gap_seconds,
+        fast_window=fast_window,
+        slow_window=slow_window,
+        volatility_window=volatility_window,
+        metrics=metrics,
+    )
+    session.add(pick_record)
     session.add(AuditEvent(
         event_type="STRATEGY_DRAFTED_FROM_LAB",
         severity="INFO",
@@ -192,8 +303,10 @@ def save_sweep_pick(
             "trades": metrics["trades"],
             "win_rate": metrics["win_rate"],
             "total_return": metrics["total_return"],
+            **({"sweep_run_id": sweep_run.id} if sweep_run is not None else {}),
         },
     ))
     session.commit()
     session.refresh(strategy)
-    return {"strategy": strategy, "evidence": evidence}
+    session.refresh(pick_record)
+    return {"strategy": strategy, "evidence": evidence, "sweep_pick": pick_record}

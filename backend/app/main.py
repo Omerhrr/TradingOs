@@ -8,19 +8,21 @@ from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.database import Base, SessionLocal, engine, get_session
-from app.models import AIResearchRun, AccountConfig, AccountSnapshot, AuditEvent, Candle, EncryptedBrokerCredential, FeatureSnapshot, LoopRun, MarketAsset, OrderIntent, OrderRecord, PositionSnapshot, ReconciliationRun, RiskPolicy, StrategyEvaluation, StrategyVersion, SystemState, TradeOutcome, TwoFactorSecret, WatchlistItem
-from app.schemas import AccountStateResponse, AuditEventResponse, AuthLoginInput, AuthLoginResponse, AuthSessionResponse, BacktestRunInput, BacktestRunResponse, BacktestSweepInput, BacktestSweepResponse, BrokerConnectionResponse, BrokerCredentialInput, CandleResponse, FeatureResponse, HealthResponse, LoopRunResponse, LoopStatusResponse, MarketAssetResponse, MarketChartResponse, OrderIntentInput, OrderIntentResponse, OrderResponse, PositionResponse, ReconciliationResponse, ResearchRunResponse, RiskPolicyResponse, StrategyComparisonResponse, StrategyCreateInput, StrategyEvaluationInput, StrategyEvaluationResponse, StrategyFromSweepInput, StrategyResponse, StrategyStatusUpdateInput, SweepPickSaveResponse, SymbolDrilldownResponse, TotpProvisionResponse, TotpStatusResponse, TradeAnalyticsResponse, TradeResponse, WatchlistItemResponse, WatchlistUpdate
+from app.models import AIResearchRun, AccountConfig, AccountSnapshot, Alert, AuditEvent, Candle, EncryptedBrokerCredential, FeatureSnapshot, LoopRun, MarketAsset, OrderIntent, OrderRecord, PositionSnapshot, ReconciliationRun, RiskPolicy, StrategyEvaluation, StrategyVersion, SystemState, TradeOutcome, TwoFactorSecret, WatchlistItem
+from app.schemas import AccountStateResponse, AlertAckResponse, AlertListResponse, AlertResponse, AlertUnreadResponse, AuditEventResponse, AuthLoginInput, AuthLoginResponse, AuthSessionResponse, BacktestRunInput, BacktestRunResponse, BacktestSweepInput, BacktestSweepResponse, BrokerConnectionResponse, BrokerCredentialInput, CandleResponse, FeatureResponse, HealthResponse, LoopRunResponse, LoopStatusResponse, MarketAssetResponse, MarketChartResponse, OrderIntentInput, OrderIntentResponse, OrderResponse, PositionResponse, ReconciliationResponse, ResearchRunResponse, RiskPolicyResponse, SavedPickCellResponse, StrategyComparisonResponse, StrategyCreateInput, StrategyEvaluationInput, StrategyEvaluationResponse, StrategyEvidenceResponse, StrategyFromSweepInput, StrategyResponse, StrategyStatusUpdateInput, SweepPickRecordResponse, SweepPickSaveResponse, SweepRunRecordResponse, SymbolDrilldownResponse, TotpProvisionResponse, TotpStatusResponse, TradeAnalyticsResponse, TradeResponse, WatchlistItemResponse, WatchlistUpdate
 from app.services.analytics import strategy_comparison, symbol_drilldown, trade_analytics
 from app.services.auth import SESSION_COOKIE, LoginGate, SessionConfigurationError, SessionManager, credential_ok, generate_totp_secret, otpauth_uri, totp_qr_svg, totp_verify
-from app.services.backtest import run_backtest, run_sweep, save_sweep_pick, SweepPickRejected
+from app.services import alerts as alerting
+from app.services.backtest import record_sweep_run, run_backtest, run_sweep, save_sweep_pick, saved_pick_cells, serialize_pick_record, strategy_sweep_picks, sweep_run_history, SweepPickRejected
 from app.services.broker import IQAirBrokerAdapter
 from app.services.credentials import BrokerCredentials, CredentialConfigurationError, CredentialVault
+from app.services.evidence import StrategyMissing, evidence_csv, evidence_pdf, strategy_evidence
 from app.services.events import event_bus, publish_event
 from app.services.market_view import market_chart
 from app.services.worker import BrokerWorker
@@ -344,9 +346,11 @@ def create_strategy_from_sweep(payload: StrategyFromSweepInput, session: Session
     Evidence is recomputed server-side over the candles stored right now, so
     the persisted validation summary can never be fabricated by the client.
     VALIDATED status is still earned only through the persisted evaluation.
+    The pick remembers its cell; when the client passes the sweep run id from
+    the lab response, the cell memory links back to that exact surface.
     """
     try:
-        return save_sweep_pick(
+        result = save_sweep_pick(
             session,
             strategy_key=payload.strategy_key,
             version=payload.version,
@@ -356,9 +360,11 @@ def create_strategy_from_sweep(payload: StrategyFromSweepInput, session: Session
             fast_window=payload.fast_window,
             slow_window=payload.slow_window,
             volatility_window=payload.volatility_window,
+            sweep_run_id=payload.sweep_run_id,
         )
     except SweepPickRejected as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    return {**result, "sweep_pick": serialize_pick_record(result["sweep_pick"])}
 
 
 @app.post(f"{settings.api_prefix}/strategies/{{strategy_id}}/evaluate", response_model=StrategyEvaluationResponse, dependencies=[Depends(_require_local_admin)], tags=["strategies"])
@@ -398,11 +404,30 @@ def run_backtest_view(payload: BacktestRunInput, session: Session = Depends(get_
 
 @app.post(f"{settings.api_prefix}/backtest/sweep", response_model=BacktestSweepResponse, dependencies=[Depends(_require_local_admin)], tags=["backtest"])
 def run_backtest_sweep_view(payload: BacktestSweepInput, session: Session = Depends(get_session)) -> dict:
-    """Bounded fast/slow EMA grid over one candle set; invalid pairs are reported, not fatal."""
+    """Bounded fast/slow EMA grid over one candle set; invalid pairs are reported, not fatal.
+
+    The runner stays a pure projection; afterwards the route records the
+    surface in the bounded sweep history so picks can remember their cell and
+    past grids can be re-opened in the lab.
+    """
     try:
-        return run_sweep(session, payload.symbol, payload.timeframe_seconds, payload.censor_gap_seconds, payload.fast_windows, payload.slow_windows, payload.volatility_window)
+        result = run_sweep(session, payload.symbol, payload.timeframe_seconds, payload.censor_gap_seconds, payload.fast_windows, payload.slow_windows, payload.volatility_window)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    record = record_sweep_run(session, result)
+    return {**result, "sweep_run_id": record.id}
+
+
+@app.get(f"{settings.api_prefix}/backtest/sweeps", response_model=list[SweepRunRecordResponse], tags=["backtest"])
+def list_sweep_runs(limit: int = Query(20, ge=1, le=100), session: Session = Depends(get_session)) -> list[object]:
+    """Remembered lab sweep surfaces, newest first; a past grid can be re-opened."""
+    return list(sweep_run_history(session, limit))
+
+
+@app.get(f"{settings.api_prefix}/backtest/picks", response_model=list[SavedPickCellResponse], tags=["backtest"])
+def list_saved_pick_cells(symbol: str = Query(min_length=1, max_length=80), timeframe_seconds: int = Query(60, ge=1, le=86_400), censor_gap_seconds: int = Query(60, ge=1, le=86_400), session: Session = Depends(get_session)) -> list[dict]:
+    """Cells already promoted to drafts for this sweep signature (heatmap markers)."""
+    return saved_pick_cells(session, symbol, timeframe_seconds, censor_gap_seconds)
 
 
 @app.get(f"{settings.api_prefix}/features", response_model=list[FeatureResponse], tags=["research"])
@@ -455,6 +480,59 @@ def update_strategy_status(strategy_id: int, payload: StrategyStatusUpdateInput,
     session.commit()
     session.refresh(strategy)
     return strategy
+
+
+@app.get(f"{settings.api_prefix}/strategies/{{strategy_id}}/sweep-history", response_model=list[SweepPickRecordResponse], tags=["strategies"])
+def list_strategy_sweep_history(strategy_id: int, session: Session = Depends(get_session)) -> list[dict]:
+    """Cell memory for one strategy: the lab cell(s) it was promoted from."""
+    try:
+        picks = strategy_sweep_picks(session, strategy_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return [serialize_pick_record(pick) for pick in picks]
+
+
+@app.get(f"{settings.api_prefix}/strategies/{{strategy_id}}/evidence", response_model=StrategyEvidenceResponse, tags=["strategies"])
+def get_strategy_evidence(strategy_id: int, session: Session = Depends(get_session)) -> dict:
+    """The honest per-strategy evidence bundle: identity, evaluation, provenance, outcomes."""
+    try:
+        return strategy_evidence(session, strategy_id)
+    except StrategyMissing as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get(f"{settings.api_prefix}/strategies/{{strategy_id}}/evidence/export.csv", tags=["strategies"])
+def export_strategy_evidence_csv(strategy_id: int, session: Session = Depends(get_session)) -> PlainTextResponse:
+    """Per-strategy evidence as a sectioned CSV report of record."""
+    try:
+        bundle = strategy_evidence(session, strategy_id)
+    except StrategyMissing as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    key = bundle["strategy"]["strategy_key"]
+    version = bundle["strategy"]["version"]
+    filename = f"evidence-{key}-{version}.csv"
+    return PlainTextResponse(
+        content=evidence_csv(bundle),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.get(f"{settings.api_prefix}/strategies/{{strategy_id}}/evidence/export.pdf", tags=["strategies"])
+def export_strategy_evidence_pdf(strategy_id: int, session: Session = Depends(get_session)) -> Response:
+    """Per-strategy evidence as a compact PDF report of record."""
+    try:
+        bundle = strategy_evidence(session, strategy_id)
+    except StrategyMissing as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    key = bundle["strategy"]["strategy_key"]
+    version = bundle["strategy"]["version"]
+    filename = f"evidence-{key}-{version}.pdf"
+    return Response(
+        content=evidence_pdf(bundle),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.get(f"{settings.api_prefix}/analytics/trades", response_model=TradeAnalyticsResponse, tags=["analytics"])
@@ -619,6 +697,40 @@ def loop_status(session: Session = Depends(get_session)) -> LoopStatusResponse:
 @app.get(f"{settings.api_prefix}/loop/runs", response_model=list[LoopRunResponse], tags=["loop"])
 def list_loop_runs(session: Session = Depends(get_session)) -> list[LoopRun]:
     return list(session.scalars(select(LoopRun).order_by(LoopRun.id.desc()).limit(100)))
+
+
+# ------------------------------------------------------------------- alerts
+
+
+@app.get(f"{settings.api_prefix}/alerts", response_model=AlertListResponse, tags=["alerts"])
+def list_alerts(unacknowledged_only: bool = Query(default=False), limit: int = Query(default=50, ge=1, le=200), session: Session = Depends(get_session)) -> dict:
+    """Operational alerts, newest first, with the unacknowledged count."""
+    statement = select(Alert).order_by(Alert.id.desc()).limit(limit)
+    if unacknowledged_only:
+        statement = statement.where(Alert.acknowledged_at.is_(None))
+    rows = list(session.scalars(statement))
+    unacknowledged = session.scalar(select(func.count()).select_from(Alert).where(Alert.acknowledged_at.is_(None))) or 0
+    return {"alerts": [alerting.serialize_alert(alert) for alert in rows], "unacknowledged": unacknowledged}
+
+
+@app.get(f"{settings.api_prefix}/alerts/unread-count", response_model=AlertUnreadResponse, tags=["alerts"])
+def alert_unread_count(session: Session = Depends(get_session)) -> AlertUnreadResponse:
+    """Lightweight badge probe for the navigation rail."""
+    return AlertUnreadResponse(unacknowledged=session.scalar(select(func.count()).select_from(Alert).where(Alert.acknowledged_at.is_(None))) or 0)
+
+
+@app.post(f"{settings.api_prefix}/alerts/{{alert_id}}/ack", response_model=AlertAckResponse, dependencies=[Depends(_require_local_admin)], tags=["alerts"])
+def acknowledge_one_alert(alert_id: int, session: Session = Depends(get_session)) -> dict:
+    try:
+        alert = alerting.acknowledge_alert(session, settings, alert_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"acknowledged": [alert.id], "auto": False}
+
+
+@app.post(f"{settings.api_prefix}/alerts/ack-all", response_model=AlertAckResponse, dependencies=[Depends(_require_local_admin)], tags=["alerts"])
+def acknowledge_all_alerts(session: Session = Depends(get_session)) -> dict:
+    return {"acknowledged": alerting.acknowledge_all(session, settings), "auto": False}
 
 
 @app.get(f"{settings.api_prefix}/account/snapshots", tags=["account"])

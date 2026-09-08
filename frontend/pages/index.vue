@@ -1,6 +1,6 @@
 <!-- TradingOS follows The Instrument Room: guarded, low-key, evidence-first operational design. -->
 <script setup lang="ts">
-import type { AuditEvent, LoopRun, LoopStatus, MarketChart, OrderIntent, PositionSnapshot, ReconciliationRun, ResearchRun, RiskPolicy, StrategyVersion, SystemState, WatchlistItem } from '~/types/trading'
+import type { AlertList, AlertRow, AuditEvent, LoopRun, LoopStatus, MarketChart, OrderIntent, PositionSnapshot, ReconciliationRun, ResearchRun, RiskPolicy, StrategyVersion, SystemState, WatchlistItem } from '~/types/trading'
 
 const api = useTradingApi()
 const auth = useAuth()
@@ -34,6 +34,7 @@ const { data: reconciliations, refresh: refreshReconciliations } = await useAsyn
 const { data: researchRuns } = await useAsyncData<ResearchRun[]>('research-runs', api.getResearchRuns)
 const { data: loopStatus, refresh: refreshLoopStatus } = await useAsyncData<LoopStatus>('loop-status', api.getLoopStatus)
 const { data: loopRuns, refresh: refreshLoopRuns } = await useAsyncData<LoopRun[]>('loop-runs', api.getLoopRuns)
+const { data: alertData, refresh: refreshAlerts } = await useAsyncData<AlertList>('guard-alerts', () => api.getAlerts(false))
 
 // --- Loop-panel market tape (needs the watchlist above) ----------------
 function pairKey(symbol: string, timeframe: number): string {
@@ -89,6 +90,43 @@ const loopGateNote = computed(() => {
   return 'Signals become risk-gated intents and approved practice orders are submitted.'
 })
 const hasAdminToken = computed(() => adminToken.value.trim().length > 0)
+
+// --- Operational alerts (loop guards and tick failures) -----------------
+const unacknowledgedAlerts = computed(() => alertData.value?.unacknowledged ?? 0)
+const visibleAlerts = computed(() => alertData.value?.alerts?.slice(0, 4) ?? [])
+const ackError = ref<string | null>(null)
+const ackingId = ref<number | null>(null)
+const ackingAll = ref(false)
+
+async function acknowledgeAlert(alert: AlertRow) {
+  const token = adminToken.value.trim()
+  if (!token) { ackError.value = 'The local admin token is required to acknowledge alerts. Set it on the Local setup page first.'; return }
+  ackingId.value = alert.id
+  ackError.value = null
+  try {
+    await api.ackAlert(token, alert.id)
+    await refreshAlerts()
+  } catch (error) {
+    ackError.value = error instanceof Error ? error.message : 'The alert could not be acknowledged.'
+  } finally {
+    ackingId.value = null
+  }
+}
+
+async function acknowledgeAllAlerts() {
+  const token = adminToken.value.trim()
+  if (!token) { ackError.value = 'The local admin token is required to acknowledge alerts. Set it on the Local setup page first.'; return }
+  ackingAll.value = true
+  ackError.value = null
+  try {
+    await api.ackAllAlerts(token)
+    await refreshAlerts()
+  } catch (error) {
+    ackError.value = error instanceof Error ? error.message : 'The alerts could not be acknowledged.'
+  } finally {
+    ackingAll.value = false
+  }
+}
 
 async function pauseSystem() {
   isPausing.value = true
@@ -170,6 +208,11 @@ watch(socketEvents, (list) => {
     const payloadTimeframe = typeof latest.payload.timeframe_seconds === 'number' ? latest.payload.timeframe_seconds : null
     if (payloadSymbol && payloadTimeframe && selectedPair.value === pairKey(payloadSymbol, payloadTimeframe)) void loadChart()
   }
+  if (latest.type === 'alert.raised' || latest.type === 'alert.acknowledged') {
+    void refreshAlerts()
+    if (latest.type === 'alert.raised') void Promise.all([refreshLoopStatus(), refreshLoopRuns(), refreshEvents()])
+    return
+  }
   if (latest.type === 'execution.trade.settled' || latest.type === 'execution.order.submitted' || latest.type === 'system.state_changed' || latest.type === 'reconciliation.completed') {
     void Promise.all([refreshState(), refreshIntents(), refreshEvents(), refreshLoopStatus()])
   }
@@ -197,6 +240,8 @@ function socketEventNote(type: string, payload: Record<string, unknown>): string
   if (type === 'reconciliation.completed') return `run #${payload.run_id} ${payload.state ?? ''}`
   if (type === 'reconciliation.failed') return String(payload.error ?? 'reconciliation failed')
   if (type === 'system.state_changed') return `system is now ${payload.system_state ?? '?'}`
+  if (type === 'alert.raised') return `${payload.code ?? 'alert'} ×${payload.occurrences ?? 1} — ${payload.message ?? ''}`
+  if (type === 'alert.acknowledged') return `alert${Array.isArray(payload.alert_ids) && payload.alert_ids.length > 1 ? 's' : ''} ${payload.auto ? 'auto-resolved' : 'acknowledged'}`
   return ''
 }
 </script>
@@ -217,7 +262,7 @@ function socketEventNote(type: string, payload: Record<string, unknown>): string
         <a class="nav-link" href="#watchlist"><span>02</span> Watchlist</a>
         <a class="nav-link" href="#risk"><span>03</span> Risk policy</a>
         <a class="nav-link" href="#research"><span>04</span> Research</a>
-        <a class="nav-link" href="#loop"><span>05</span> Strategy loop</a>
+        <a class="nav-link" href="#loop"><span>05</span> Strategy loop<span v-if="unacknowledgedAlerts" class="alert-badge" :title="`${unacknowledgedAlerts} unacknowledged alert(s)`">{{ unacknowledgedAlerts > 9 ? '9+' : unacknowledgedAlerts }}</span></a>
         <NuxtLink class="nav-link" to="/strategies"><span>06</span> Strategy desk</NuxtLink>
         <NuxtLink class="nav-link" to="/analytics"><span>07</span> Outcome analytics</NuxtLink>
         <NuxtLink class="nav-link" to="/compare"><span>08</span> Strategy compare</NuxtLink>
@@ -436,6 +481,23 @@ function socketEventNote(type: string, payload: Record<string, unknown>): string
               <span class="loop-note">{{ run.error_message ?? run.summary?.reason ?? (run.summary?.skipped ? 'guards not satisfied' : 'clean pass') }}</span>
             </div>
             <div v-if="!loopRuns?.length" class="loop-row loop-row--empty"><span>—</span><span>NO TICKS</span><span>—</span><span>—</span><span>—</span><span>The loop has not run yet in this session.</span></div>
+          </div>
+          <div class="guard-alerts" aria-label="Operational alerts">
+            <div class="guard-alerts-head">
+              <p class="mono micro ws-feed-title">OPERATIONAL ALERTS<span v-if="unacknowledgedAlerts" class="alert-count">{{ unacknowledgedAlerts > 9 ? '9+' : unacknowledgedAlerts }}</span></p>
+              <button v-if="unacknowledgedAlerts" class="mini-control" type="button" :disabled="ackingAll" @click="acknowledgeAllAlerts">{{ ackingAll ? 'CLEARING…' : 'ACK ALL' }}</button>
+            </div>
+            <div v-for="alert in visibleAlerts" :key="alert.id" :class="['alert-item', { 'alert-item--acked': alert.acknowledged }]">
+              <span :class="['mono', 'alert-sev', `alert-sev--${alert.severity.toLowerCase()}`]">{{ alert.severity }}</span>
+              <div class="alert-copy">
+                <span class="mono alert-code">{{ alert.code }}<template v-if="alert.occurrences > 1"> ×{{ alert.occurrences }}</template></span>
+                <span class="alert-message">{{ alert.message }}</span>
+              </div>
+              <button v-if="!alert.acknowledged" class="mini-control" type="button" :disabled="ackingId === alert.id" @click="acknowledgeAlert(alert)">{{ ackingId === alert.id ? '…' : 'ACK' }}</button>
+              <span v-else class="mono micro alert-acked-note">ACKED</span>
+            </div>
+            <p v-if="!visibleAlerts.length" class="quiet-note alert-empty">No alerts. Guards report through this panel the moment a tick is skipped, a submission fails, or the loop breaks.</p>
+            <p v-if="ackError" class="error-note">{{ ackError }}</p>
           </div>
           <div class="ws-feed" aria-label="Live loop event stream">
             <p class="mono micro ws-feed-title">LIVE EVENT STREAM<span :class="['ws-dot', isConnected ? 'ws-dot--on' : 'ws-dot--off']"></span></p>

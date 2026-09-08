@@ -1,5 +1,5 @@
 // TradingOS follows The Instrument Room: guarded, low-key, evidence-first operational design.
-import type { AuditEvent, AuthLogin, AuthSession, BacktestRun, BacktestSweep, BrokerConnection, BrokerCredentialInput, LoopRun, LoopStatus, MarketChart, OrderIntent, PositionSnapshot, ReconciliationRun, ResearchRun, RiskPolicy, StrategyComparison, StrategyDefinition, StrategyEvaluation, StrategyStatusInput, StrategyVersion, SweepPickSave, SymbolDrilldown, SystemState, TotpProvision, TotpStatus, TradeAnalytics, WatchlistItem } from '~/types/trading'
+import type { AlertList, AuditEvent, AuthLogin, AuthSession, BacktestRun, BacktestSweep, BrokerConnection, BrokerCredentialInput, LoopRun, LoopStatus, MarketChart, OrderIntent, PositionSnapshot, ReconciliationRun, ResearchRun, RiskPolicy, SavedPickCell, StrategyComparison, StrategyDefinition, StrategyEvaluation, StrategyStatusInput, StrategyVersion, SweepPickRecord, SweepPickSave, SweepRunRecord, SymbolDrilldown, SystemState, TotpProvision, TotpStatus, TradeAnalytics, WatchlistItem } from '~/types/trading'
 
 export function useTradingApi() {
   const config = useRuntimeConfig()
@@ -51,11 +51,23 @@ export function useTradingApi() {
     getStrategyEvaluations: (strategyId: number) => request<StrategyEvaluation[]>(`/strategies/${strategyId}/evaluations`),
     runBacktest: (adminToken: string, payload: { strategy_version_id?: number; definition?: Record<string, unknown>; symbol: string; timeframe_seconds: number; censor_gap_seconds: number }) => localControl<BacktestRun>('/backtest/run', adminToken, { method: 'POST', body: payload }),
     runBacktestSweep: (adminToken: string, payload: { symbol: string; timeframe_seconds: number; censor_gap_seconds: number; fast_windows: number[]; slow_windows: number[]; volatility_window: number }) => localControl<BacktestSweep>('/backtest/sweep', adminToken, { method: 'POST', body: payload }),
+    getSweepRuns: (limit = 20) => request<SweepRunRecord[]>(`/backtest/sweeps?limit=${limit}`),
+    getSavedPickCells: (symbol: string, timeframeSeconds: number, censorGapSeconds: number) =>
+      request<SavedPickCell[]>(`/backtest/picks?symbol=${encodeURIComponent(symbol)}&timeframe_seconds=${timeframeSeconds}&censor_gap_seconds=${censorGapSeconds}`),
+    getStrategySweepHistory: (strategyId: number) => request<SweepPickRecord[]>(`/strategies/${strategyId}/sweep-history`),
+    getAlerts: (unacknowledgedOnly = false) => request<AlertList>(`/alerts${unacknowledgedOnly ? '?unacknowledged_only=true' : ''}`),
+    ackAlert: (adminToken: string, alertId: number) => localControl<{ acknowledged: number[] }>(`/alerts/${alertId}/ack`, adminToken, { method: 'POST' }),
+    ackAllAlerts: (adminToken: string) => localControl<{ acknowledged: number[] }>('/alerts/ack-all', adminToken, { method: 'POST' }),
+    // The evidence exports are report-of-record downloads: fetched as a blob
+    // with the admin-token header so they work in local AND remote-gated mode
+    // (a plain <a href> navigation would drop the header and the strict cookie).
+    downloadEvidence: async (adminToken: string, strategyId: number, format: 'csv' | 'pdf'): Promise<Blob> =>
+      localControl<Blob>(`/strategies/${strategyId}/evidence/export.${format}`, adminToken, { responseType: 'blob' }),
     provisionTotp: (adminToken: string) => localControl<TotpProvision>('/auth/totp/provision', adminToken, { method: 'POST' }),
     totpStatus: (adminToken: string) => localControl<TotpStatus>('/auth/totp/status', adminToken),
     disableTotp: (adminToken: string) => localControl<TotpStatus>('/auth/totp/disable', adminToken, { method: 'POST' }),
     createStrategy: (adminToken: string, payload: { strategy_key: string; version: string; definition: StrategyDefinition }) => localControl<StrategyVersion>('/strategies', adminToken, { method: 'POST', body: payload }),
-    saveSweepPick: (adminToken: string, payload: { strategy_key: string; version: string; symbol: string; timeframe_seconds: number; censor_gap_seconds: number; fast_window: number; slow_window: number; volatility_window: number }) => localControl<SweepPickSave>('/strategies/from-sweep', adminToken, { method: 'POST', body: payload }),
+    saveSweepPick: (adminToken: string, payload: { strategy_key: string; version: string; symbol: string; timeframe_seconds: number; censor_gap_seconds: number; fast_window: number; slow_window: number; volatility_window: number; sweep_run_id?: number | null }) => localControl<SweepPickSave>('/strategies/from-sweep', adminToken, { method: 'POST', body: payload }),
     updateStrategyStatus: (adminToken: string, strategyId: number, payload: StrategyStatusInput) => localControl<StrategyVersion>(`/strategies/${strategyId}/status`, adminToken, { method: 'PUT', body: payload }),
     evaluateStrategy: (adminToken: string, strategyId: number, payload: { symbol: string; timeframe_seconds: number; censor_gap_seconds: number }) => localControl<StrategyEvaluation>(`/strategies/${strategyId}/evaluate`, adminToken, { method: 'POST', body: payload }),
     pause: () => request<SystemState>('/system/pause', { method: 'POST' }),

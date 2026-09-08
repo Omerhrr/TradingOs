@@ -52,10 +52,17 @@ def test_loop_engine_tick_publishes_started_and_completed() -> None:
         with SessionLocal() as session:
             loop_engine.tick(session)  # guards make this a skipped tick in a paused world
         started = ws.receive_json()
+        # A tripped guard now also raises a deduplicated alert on the same bus:
+        # in this paused world the guard fires, so the alert frame must arrive
+        # between tick.started and tick.completed.
+        guard_alert = ws.receive_json()
         completed = ws.receive_json()
     assert started["type"] == "loop.tick.started"
+    assert guard_alert["type"] == "alert.raised"
+    assert guard_alert["payload"]["code"] == "LOOP_GUARD_TRIPPED"
     assert completed["type"] == "loop.tick.completed"
     assert completed["payload"]["summary"]["skipped"] is True
+    assert completed["payload"]["summary"]["guard_alert"]["alert_id"] == guard_alert["payload"]["alert_id"]
 
 
 def test_submission_publishes_execution_event() -> None:

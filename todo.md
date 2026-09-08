@@ -14,3 +14,6 @@
 - [x] Make the Nuxt frontend Bun-compatible, resolve the Vue Router/Volar type-check mismatch, and add missing browser static assets.
 - [x] Add an explicit local credential-configuration and PRACTICE-only connection walkthrough to the control plane and runbook.
 - [x] Add a local login page for admin-token authentication, encrypted IQ Option credential submission, and guided PRACTICE-only connection and reconciliation.
+- [x] Wire the full strategy → intent → practice-execution loop with a fail-closed guard, idempotent per-candle intents, and audit coverage.
+- [x] Ship the operator UI increments: strategy desk with walk-forward history, outcome analytics with per-symbol drill-down, strategy comparison, candle chart with signal markers, WebSocket live loop panel, remote-access gate with TOTP provisioning QR, and a backtest lab whose sweep picks become draft strategies with recomputed evidence.
+- [x] Add per-strategy evidence export (CSV/PDF), bounded sweep-parameter memory so picks recall their cell, and deduplicated alerting when a loop guard trips.

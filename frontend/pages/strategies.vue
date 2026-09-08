@@ -1,7 +1,6 @@
 <!-- Design: The Instrument Room — the strategy desk drafts parameter sets; validation is earned from censored data, never assumed. -->
 <script setup lang="ts">
 import type { StrategyEvaluation, StrategyVersion } from '~/types/trading'
-
 const api = useTradingApi()
 const adminToken = ref('')
 const strategies = ref<StrategyVersion[]>([])
@@ -38,6 +37,46 @@ const amountIsValid = computed(() => form.value.trade_amount === null || form.va
 const formIsValid = computed(() => keyIsValid.value && windowsAreValid.value && amountIsValid.value && form.value.version.trim().length > 0 && form.value.volatility_window >= 1 && form.value.max_drawdown_percent > 0 && form.value.max_drawdown_percent <= 100)
 
 const statusChipClass: Record<string, string> = { DRAFT: 'strategy-chip--draft', VALIDATED: 'strategy-chip--validated', RETIRED: 'strategy-chip--retired', VALIDATING: 'strategy-chip--draft' }
+
+// Lab provenance: a draft promoted from a sweep cell carries its origin in the
+// persisted validation summary, so the desk shows the exact cell it came from.
+function labOrigin(strategy: StrategyVersion): string | null {
+  const summary = strategy.validation_summary as Record<string, unknown>
+  if (!summary || summary.origin !== 'backtest_lab') return null
+  const fast = summary.fast_window ?? strategy.definition?.fast_window
+  const slow = summary.slow_window ?? strategy.definition?.slow_window
+  const symbol = summary.symbol
+  return `LAB CELL ${fast}/${slow}${symbol ? ` · ${symbol}` : ''}`
+}
+
+// Evidence exports are report-of-record downloads: fetched as a blob with the
+// admin token, then handed to the browser via an object URL (a plain link
+// would drop the header under the remote gate).
+const exportingFor = ref<number | null>(null)
+const exportError = ref<string | null>(null)
+
+async function exportEvidence(strategy: StrategyVersion, format: 'csv' | 'pdf') {
+  const token = adminToken.value.trim()
+  if (!token) { exportError.value = 'The local admin token is required to export evidence. Paste it in the token field above.'; return }
+  exportingFor.value = strategy.id
+  exportError.value = null
+  try {
+    const blob = await api.downloadEvidence(token, strategy.id, format)
+    const url = URL.createObjectURL(blob)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = `evidence-${strategy.strategy_key}-${strategy.version}.${format}`
+    document.body.appendChild(anchor)
+    anchor.click()
+    anchor.remove()
+    URL.revokeObjectURL(url)
+    window.sessionStorage.setItem('tradingos-local-admin-token', token)
+  } catch (error) {
+    exportError.value = messageFor(error, `The ${format.toUpperCase()} evidence report could not be generated.`)
+  } finally {
+    exportingFor.value = null
+  }
+}
 
 function messageFor(error: unknown, fallback: string) {
   if (error && typeof error === 'object' && 'data' in error) {
@@ -245,10 +284,13 @@ useHead({ title: 'TradingOS · Strategy Desk' })
             </header>
             <p class="mono strategy-params">{{ paramList(strategy) }}</p>
             <p class="strategy-meta">persisted {{ new Date(strategy.created_at).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' }) }} · validation {{ strategy.validation_summary && Object.keys(strategy.validation_summary).length ? 'recorded' : 'pending' }}</p>
+            <p v-if="labOrigin(strategy)" class="mono lab-origin-chip" title="Promoted from this exact lab sweep cell">{{ labOrigin(strategy) }}</p>
 
             <div class="strategy-actions">
               <button class="mini-control" type="button" @click="toggleEval(strategy.id)">{{ evalOpenFor === strategy.id ? 'CLOSE EVALUATION' : 'EVALUATE' }}</button>
               <button class="mini-control" type="button" @click="toggleHistory(strategy.id)">{{ historyOpenFor === strategy.id ? 'HIDE HISTORY' : 'HISTORY' }}</button>
+              <button class="mini-control" type="button" :disabled="exportingFor === strategy.id" @click="exportEvidence(strategy, 'csv')">{{ exportingFor === strategy.id ? '…' : 'EXPORT CSV' }}</button>
+              <button class="mini-control" type="button" :disabled="exportingFor === strategy.id" @click="exportEvidence(strategy, 'pdf')">{{ exportingFor === strategy.id ? '…' : 'EXPORT PDF' }}</button>
               <button v-if="strategy.status !== 'RETIRED'" class="mini-control mini-control--danger" type="button" :disabled="statusBusyFor === strategy.id" @click="changeStatus(strategy, 'RETIRED')">{{ statusBusyFor === strategy.id ? '…' : 'RETIRED' }}</button>
               <button v-if="strategy.status === 'RETIRED'" class="mini-control" type="button" :disabled="statusBusyFor === strategy.id" @click="changeStatus(strategy, 'DRAFT')">{{ statusBusyFor === strategy.id ? '…' : 'RE-DRAFT' }}</button>
             </div>
@@ -286,6 +328,7 @@ useHead({ title: 'TradingOS · Strategy Desk' })
         </div>
         <p v-if="evalError" class="error-note desk-error desk-pad">{{ evalError }}</p>
         <p v-if="statusError" class="error-note desk-error desk-pad">{{ statusError }}</p>
+        <p v-if="exportError" class="error-note desk-error desk-pad">{{ exportError }}</p>
         <p class="quiet-note desk-contract">Retiring a version removes it from the loop on the next tick. Re-drafting returns it to DRAFT — it must be validated again before any new exposure.</p>
       </section>
     </div>
