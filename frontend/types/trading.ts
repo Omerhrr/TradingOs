@@ -71,6 +71,47 @@ export interface ReconciliationRun {
   finished_at: string | null
 }
 
+export interface LoopSignal {
+  strategy_id: number
+  symbol: string
+  timeframe_seconds: number
+  candle_open_time: string
+  signal: 'CALL' | 'PUT'
+}
+
+export interface LoopIntentOutcome {
+  intent_id: number
+  status: string
+  reason: string
+}
+
+export interface LoopRun {
+  id: number
+  state: 'RUNNING' | 'SUCCEEDED' | 'FAILED'
+  error_message: string | null
+  summary: {
+    skipped?: boolean
+    reason?: string
+    signals?: LoopSignal[]
+    intents_created?: LoopIntentOutcome[]
+    intents_submitted?: number
+    submit_errors?: Array<{ intent_id: number; error_type: string; detail: string }>
+    reconciliation_run_id?: number
+    strategies?: number
+    watchlist?: number
+  }
+  started_at: string
+  finished_at: string | null
+}
+
+export interface LoopStatus {
+  loop_enabled: boolean
+  practice_execution_enabled: boolean
+  broker_connection: string
+  system_state: 'PAUSED' | 'ACTIVE' | 'HALTED' | null
+  last_run: LoopRun | null
+}
+
 export interface PositionSnapshot {
   id: number
   broker_position_id: string

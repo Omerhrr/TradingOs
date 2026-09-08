@@ -1,10 +1,14 @@
 <!-- TradingOS follows The Instrument Room: guarded, low-key, evidence-first operational design. -->
 <script setup lang="ts">
-import type { AuditEvent, OrderIntent, PositionSnapshot, ReconciliationRun, ResearchRun, RiskPolicy, StrategyVersion, SystemState, WatchlistItem } from '~/types/trading'
+import type { AuditEvent, LoopRun, LoopStatus, OrderIntent, PositionSnapshot, ReconciliationRun, ResearchRun, RiskPolicy, StrategyVersion, SystemState, WatchlistItem } from '~/types/trading'
 
 const api = useTradingApi()
 const isPausing = ref(false)
 const pauseError = ref<string | null>(null)
+const isTicking = ref(false)
+const tickError = ref<string | null>(null)
+const tickNotice = ref<string | null>(null)
+const adminToken = ref('')
 const now = ref(new Date())
 const visualAssets = {
   logo: '/tradingos-mark.svg',
@@ -13,13 +17,15 @@ const visualAssets = {
 
 const { data: state, pending: statePending, error: stateError, refresh: refreshState } = await useAsyncData<SystemState>('trading-state', api.getState)
 const { data: risk, error: riskError } = await useAsyncData<RiskPolicy>('risk-policy', api.getRisk)
-const { data: events } = await useAsyncData<AuditEvent[]>('audit-events', api.getEvents)
+const { data: events, refresh: refreshEvents } = await useAsyncData<AuditEvent[]>('audit-events', api.getEvents)
 const { data: watchlist } = await useAsyncData<WatchlistItem[]>('watchlist', api.getWatchlist)
 const { data: strategies } = await useAsyncData<StrategyVersion[]>('strategies', api.getStrategies)
-const { data: intents } = await useAsyncData<OrderIntent[]>('order-intents', api.getOrderIntents)
+const { data: intents, refresh: refreshIntents } = await useAsyncData<OrderIntent[]>('order-intents', api.getOrderIntents)
 const { data: positions } = await useAsyncData<PositionSnapshot[]>('positions', api.getPositions)
 const { data: reconciliations, refresh: refreshReconciliations } = await useAsyncData<ReconciliationRun[]>('reconciliations', api.getReconciliationRuns)
 const { data: researchRuns } = await useAsyncData<ResearchRun[]>('research-runs', api.getResearchRuns)
+const { data: loopStatus, refresh: refreshLoopStatus } = await useAsyncData<LoopStatus>('loop-status', api.getLoopStatus)
+const { data: loopRuns, refresh: refreshLoopRuns } = await useAsyncData<LoopRun[]>('loop-runs', api.getLoopRuns)
 
 const runtime = computed(() => state.value?.system_state ?? 'UNAVAILABLE')
 const sourceStatus = computed(() => state.value?.broker_connection === 'CONNECTED' ? 'RECONCILED' : 'AWAITING BROKER')
@@ -27,13 +33,26 @@ const latestReconciliation = computed(() => reconciliations.value?.[0])
 const latestResearch = computed(() => researchRuns.value?.[0])
 const validatedStrategies = computed(() => strategies.value?.filter(strategy => strategy.status === 'VALIDATED').length ?? 0)
 const latestIntent = computed(() => intents.value?.[0])
+const latestLoopRun = computed(() => loopRuns.value?.[0] ?? loopStatus.value?.last_run ?? null)
+const loopMode = computed(() => {
+  if (loopStatus.value?.loop_enabled) return 'AUTONOMOUS'
+  return 'MANUAL TICK'
+})
+const loopGateNote = computed(() => {
+  if (!loopStatus.value) return 'The loop service has not answered yet.'
+  if (loopStatus.value.system_state !== 'ACTIVE') return `The system is ${loopStatus.value.system_state}; the loop refuses new exposure until it is ACTIVE.`
+  if (loopStatus.value.broker_connection !== 'CONNECTED') return 'The practice broker is not connected; the loop stays fail-closed.'
+  if (!loopStatus.value.practice_execution_enabled) return 'Signals become risk-gated intents. Submission stays disabled by local configuration.'
+  return 'Signals become risk-gated intents and approved practice orders are submitted.'
+})
+const hasAdminToken = computed(() => adminToken.value.trim().length > 0)
 
 async function pauseSystem() {
   isPausing.value = true
   pauseError.value = null
   try {
     await api.pause()
-    await Promise.all([refreshState(), refreshReconciliations()])
+    await Promise.all([refreshState(), refreshReconciliations(), refreshLoopStatus(), refreshLoopRuns()])
   } catch (error) {
     pauseError.value = error instanceof Error ? error.message : 'The pause request could not be confirmed.'
   } finally {
@@ -41,7 +60,42 @@ async function pauseSystem() {
   }
 }
 
+function loopTickLabel(run: LoopRun | null): string {
+  if (!run) return '—'
+  if (run.state === 'FAILED') return 'FAILED'
+  if (run.summary?.skipped) return 'SKIPPED'
+  const signals = run.summary?.signals?.length ?? 0
+  const created = run.summary?.intents_created?.length ?? 0
+  return `${signals} SIGNAL${signals === 1 ? '' : 'S'} · ${created} INTENT${created === 1 ? '' : 'S'}`
+}
+
+async function runLoopTick() {
+  if (!hasAdminToken.value) {
+    tickError.value = 'The local admin token is missing. Set it on the Local setup page first.'
+    return
+  }
+  isTicking.value = true
+  tickError.value = null
+  tickNotice.value = null
+  try {
+    const run = await api.runLoopTick(adminToken.value.trim())
+    if (run.state === 'SUCCEEDED') {
+      tickNotice.value = run.summary?.skipped
+        ? `Tick skipped — ${run.summary?.reason ?? 'guards are not satisfied'}.`
+        : `Tick completed — ${run.summary?.signals?.length ?? 0} signal(s), ${run.summary?.intents_created?.length ?? 0} intent(s), ${run.summary?.intents_submitted ?? 0} submitted.`
+    } else {
+      tickError.value = run.error_message ?? 'The loop tick failed; the system remains fail-closed.'
+    }
+    await Promise.all([refreshLoopStatus(), refreshLoopRuns(), refreshState(), refreshIntents(), refreshEvents(), refreshReconciliations()])
+  } catch (error) {
+    tickError.value = error instanceof Error ? error.message : 'The loop tick could not be confirmed.'
+  } finally {
+    isTicking.value = false
+  }
+}
+
 onMounted(() => {
+  adminToken.value = window.sessionStorage.getItem('tradingos-local-admin-token') ?? ''
   window.setInterval(() => { now.value = new Date() }, 30_000)
 })
 </script>
@@ -62,8 +116,9 @@ onMounted(() => {
         <a class="nav-link" href="#watchlist"><span>02</span> Watchlist</a>
         <a class="nav-link" href="#risk"><span>03</span> Risk policy</a>
         <a class="nav-link" href="#research"><span>04</span> Research</a>
-        <a class="nav-link" href="#evidence"><span>05</span> Evidence log</a>
-        <NuxtLink class="nav-link" to="/setup"><span>06</span> Local setup</NuxtLink>
+        <a class="nav-link" href="#loop"><span>05</span> Strategy loop</a>
+        <a class="nav-link" href="#evidence"><span>06</span> Evidence log</a>
+        <NuxtLink class="nav-link" to="/setup"><span>07</span> Local setup</NuxtLink>
       </nav>
 
       <div class="rail-foot">
@@ -204,13 +259,53 @@ onMounted(() => {
             <div v-for="intent in intents?.slice(0, 5)" :key="intent.id" class="intent-row">
               <span class="mono">{{ new Date(intent.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }}</span>
               <span>{{ intent.symbol }} · {{ intent.side }}</span>
-              <span>#{{ intent.strategy_version_id ?? '—' }}</span>
+              <span>{{ intent.idempotency_key?.startsWith('loop:') ? 'AUTO' : 'MANUAL' }} #{{ intent.strategy_version_id ?? '—' }}</span>
               <span>${{ intent.requested_amount.toFixed(2) }}</span>
               <span :class="['severity', `severity--${intent.status.toLowerCase()}`]">{{ intent.status }}</span>
             </div>
             <div v-if="!intents?.length" class="intent-row intent-row--empty"><span>—</span><span>NO INTENTS</span><span>Risk authorization creates a persisted intent before any practice submission is possible.</span><span>—</span><span>LOCKED</span></div>
           </div>
           <p class="ledger-contract">An intent is not an order. Practice submission is separately disabled unless the local configuration explicitly enables it after verified reconciliation.</p>
+        </section>
+
+        <section id="loop" class="panel operations-panel operations-panel--wide">
+          <div class="panel-heading">
+            <div>
+              <p class="mono eyebrow">STRATEGY → INTENT → EXECUTION</p>
+              <h3>Autonomous practice loop</h3>
+            </div>
+            <span :class="['state-chip', `state-chip--${latestLoopRun?.state?.toLowerCase() ?? 'waiting'}`]">{{ latestLoopRun?.state ?? 'WAITING' }} · {{ loopMode }}</span>
+          </div>
+          <div class="operations-body">
+            <dl class="compact-readout">
+              <div><dt>LAST TICK</dt><dd>{{ latestLoopRun?.finished_at ? new Date(latestLoopRun.finished_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '—' }}</dd></div>
+              <div><dt>OUTCOME</dt><dd>{{ loopTickLabel(latestLoopRun) }}</dd></div>
+              <div><dt>SUBMITTED</dt><dd>{{ latestLoopRun?.summary?.intents_submitted ?? 0 }} ORDERS</dd></div>
+            </dl>
+            <p class="quiet-note">{{ loopGateNote }}</p>
+            <p v-if="latestLoopRun?.error_message" class="error-note">{{ latestLoopRun.error_message }}</p>
+            <p v-if="tickError" class="error-note">{{ tickError }}</p>
+            <p v-if="tickNotice" class="loop-notice">{{ tickNotice }}</p>
+            <div class="loop-actions">
+              <button class="run-control" type="button" :disabled="isTicking || !hasAdminToken" @click="runLoopTick">
+                <span></span>{{ isTicking ? 'RUNNING TICK…' : 'RUN ONE LOOP TICK' }}
+              </button>
+              <span v-if="!hasAdminToken" class="mono loop-hint">SET THE ADMIN TOKEN ON THE LOCAL SETUP PAGE TO DRIVE THE LOOP</span>
+            </div>
+          </div>
+          <div class="loop-runs">
+            <div class="loop-row loop-row--head"><span>TIME</span><span>STATE</span><span>SIGNALS</span><span>INTENTS</span><span>SUBMITTED</span><span>NOTE</span></div>
+            <div v-for="run in loopRuns?.slice(0, 5)" :key="run.id" class="loop-row">
+              <span class="mono">{{ run.finished_at ? new Date(run.finished_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '…' }}</span>
+              <span :class="['severity', `severity--${run.state.toLowerCase()}`]">{{ run.state }}</span>
+              <span>{{ run.summary?.signals?.length ?? 0 }}</span>
+              <span>{{ run.summary?.intents_created?.length ?? 0 }}</span>
+              <span>{{ run.summary?.intents_submitted ?? 0 }}</span>
+              <span class="loop-note">{{ run.error_message ?? run.summary?.reason ?? (run.summary?.skipped ? 'guards not satisfied' : 'clean pass') }}</span>
+            </div>
+            <div v-if="!loopRuns?.length" class="loop-row loop-row--empty"><span>—</span><span>NO TICKS</span><span>—</span><span>—</span><span>—</span><span>The loop has not run yet in this session.</span></div>
+          </div>
+          <p class="ledger-contract">Every tick reconciles first, computes the EMA-cross signal on the latest closed candle, and routes it through the same risk gate as manual intents. One candle can produce one intent — never two.</p>
         </section>
       </section>
 
