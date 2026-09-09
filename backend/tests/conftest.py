@@ -57,6 +57,7 @@ def _restore_pristine_world():
         AccountConfig,
         AccountSnapshot,
         Alert,
+        AlertRule,
         AuditEvent,
         Candle,
         EncryptedBrokerCredential,
@@ -76,6 +77,7 @@ def _restore_pristine_world():
         SweepRunRecord,
         TradeOutcome,
         TwoFactorSecret,
+        WebhookDelivery,
     )
 
     Base.metadata.create_all(bind=engine)
@@ -84,7 +86,7 @@ def _restore_pristine_world():
                       LearningEpisode, AccountSnapshot, MarketAsset, FeatureSnapshot,
                       Candle, ReconciliationRun, LoopRun, StrategyEvaluation, StrategyVersion, RiskPolicy,
                       AccountConfig, EncryptedBrokerCredential, TwoFactorSecret, AuditEvent,
-                      SweepPickRecord, SweepRunRecord, Alert):
+                      SweepPickRecord, SweepRunRecord, Alert, WebhookDelivery, AlertRule):
             session.query(model).delete()
         if session.scalar(select(AccountConfig.id).limit(1)) is None:
             session.add(AccountConfig(account_label="Primary account", mode="PRACTICE",

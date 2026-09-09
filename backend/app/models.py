@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from enum import Enum
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, JSON, String, Text, UniqueConstraint, func
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -344,6 +344,59 @@ class Alert(Base):
     acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class AlertRule(Base):
+    """Operator-owned configuration for one alert code.
+
+    Rules exist so a running system can be silenced or re-tuned without a
+    restart or a redeploy: a rule decides whether a code raises at all, the
+    severity it pages at, its dedupe cooldown, and whether it fans out to the
+    external webhook. Missing rule rows fall back to the built-in defaults
+    (enabled, caller-provided severity, settings cooldown), so the seeding
+    step is a convenience, never a correctness dependency.
+    """
+
+    __tablename__ = "alert_rules"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    code: Mapped[str] = mapped_column(String(64), unique=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    severity: Mapped[str] = mapped_column(String(16), default="WARNING")
+    cooldown_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    notify_webhook: Mapped[bool] = mapped_column(Boolean, default=True)
+    description: Mapped[str] = mapped_column(String(255), default="")
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class WebhookDelivery(Base):
+    """One outbound webhook notification attempt-cycle for the retry worker.
+
+    A delivery is enqueued atomically with the alert it belongs to and is the
+    single unit of work for the background dispatcher. ``attempts`` grows on
+    every transport try; ``next_attempt_at`` schedules the exponential
+    backoff; EXHAUSTED rows stay queryable so an operator can retry them by
+    hand with a fresh attempt budget.
+    """
+
+    __tablename__ = "webhook_deliveries"
+    __table_args__ = (Index("ix_webhook_due", "status", "next_attempt_at"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    alert_id: Mapped[int | None] = mapped_column(ForeignKey("alerts.id"), nullable=True, index=True)
+    event: Mapped[str] = mapped_column(String(16), default="alert")  # alert | test
+    code: Mapped[str] = mapped_column(String(64), index=True)
+    target_url: Mapped[str] = mapped_column(String(512))
+    status: Mapped[str] = mapped_column(String(16), default="PENDING")  # PENDING | DELIVERED | EXHAUSTED
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=5)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_http_status: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    body: Mapped[dict] = mapped_column(JSON, default=dict)
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class SweepRunRecord(Base):

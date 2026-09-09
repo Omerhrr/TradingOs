@@ -516,3 +516,69 @@ export interface SymbolDrilldown {
   by_strategy: GroupStats[]
   recent: TradeAnalyticsRow[]
 }
+
+export interface AlertRule {
+  id: number
+  code: string
+  enabled: boolean
+  severity: string
+  cooldown_seconds: number | null
+  notify_webhook: boolean
+  description: string
+  updated_at: string | null
+}
+
+export interface AlertRuleList {
+  rules: AlertRule[]
+}
+
+export interface AlertRuleUpdateInput {
+  enabled?: boolean
+  severity?: string
+  cooldown_seconds?: number | null
+  notify_webhook?: boolean
+}
+
+export interface WebhookDeliveryRow {
+  id: number
+  alert_id: number | null
+  event: string
+  code: string
+  target_url: string
+  status: string
+  attempts: number
+  max_attempts: number
+  next_attempt_at: string | null
+  last_http_status: number | null
+  last_error: string | null
+  delivered_at: string | null
+  created_at: string
+}
+
+export interface WebhookDeliveryList {
+  deliveries: WebhookDeliveryRow[]
+}
+
+export interface WebhookPolicy {
+  target_configured: boolean
+  target_url: string | null
+  max_attempts: number
+  backoff_base_seconds: number
+  backoff_max_seconds: number
+  timeout_seconds: number
+  signing_enabled: boolean
+}
+
+export interface AIStatus {
+  ai_enabled: boolean
+  model: string
+  base_url: string | null
+  api_key_configured: boolean
+  ready: boolean
+  budget: {
+    tokens_used_today: number
+    token_budget: number
+    runs_today: number
+    run_limit: number
+  }
+}

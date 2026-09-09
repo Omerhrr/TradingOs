@@ -1,6 +1,6 @@
 <!-- Design: The Instrument Room — a local-only, high-trust setup console where safety and evidence are more prominent than action. -->
 <script setup lang="ts">
-import type { BrokerConnection, ReconciliationRun, TotpProvision, TotpStatus } from '~/types/trading'
+import type { AIStatus, BrokerConnection, ReconciliationRun, TotpProvision, TotpStatus } from '~/types/trading'
 
 const api = useTradingApi()
 const adminToken = ref('')
@@ -17,6 +17,8 @@ const totpProvision = ref<TotpProvision | null>(null)
 const totpState = ref<TotpStatus | null>(null)
 const totpBusy = ref(false)
 const totpError = ref<string | null>(null)
+const aiStatus = ref<AIStatus | null>(null)
+const aiError = ref<string | null>(null)
 
 function messageFor(error: unknown, fallback: string) {
   if (error && typeof error === 'object' && 'data' in error) {
@@ -29,7 +31,18 @@ function messageFor(error: unknown, fallback: string) {
 onMounted(() => {
   adminToken.value = window.sessionStorage.getItem('tradingos-local-admin-token') ?? ''
   refreshTotpState()
+  refreshAiStatus()
 })
+
+async function refreshAiStatus() {
+  if (!adminToken.value.trim()) return
+  aiError.value = null
+  try {
+    aiStatus.value = await api.getAiStatus(adminToken.value.trim())
+  } catch (error) {
+    aiError.value = messageFor(error, 'The AI readiness probe could not be read.')
+  }
+}
 
 async function storeCredentials() {
   errorMessage.value = null
@@ -116,6 +129,12 @@ async function disableTotpSecret() {
 }
 
 const isPracticeConnected = computed(() => connection.value?.state === 'CONNECTED' && connection.value.account_mode === 'PRACTICE')
+const aiStateChip = computed(() => {
+  if (!aiStatus.value) return 'NOT PROBED'
+  if (aiStatus.value.ready) return 'LLM READY'
+  if (!aiStatus.value.ai_enabled) return 'DISABLED'
+  return 'MISCONFIGURED'
+})
 </script>
 
 <template>
@@ -201,6 +220,28 @@ const isPracticeConnected = computed(() => connection.value?.state === 'CONNECTE
         </div>
       </div>
     </section>
+
+    <section class="setup-card setup-card--actions">
+      <div class="setup-heading"><div><p class="mono eyebrow">04 / AI RESEARCH (OPTIONAL)</p><h2>LLM readiness</h2></div><span :class="['connection-chip', { 'connection-chip--ready': aiStatus?.ready }]">{{ aiStateChip }}</span></div>
+      <p v-if="aiError" class="setup-error">{{ aiError }}</p>
+      <p class="setup-summary">The bounded research path speaks any OpenAI-compatible endpoint. For a DeepSeek key, set the environment below and restart the backend — the key stays in the environment, never in the database or the browser. Research runs are budget-capped per day and can only output hypotheses; they hold no broker or order access.</p>
+      <div class="ai-env-block mono">
+        <p><span>TRADINGOS_AI_ENABLED</span>=true</p>
+        <p><span>TRADINGOS_AI_API_KEY</span>=sk-…your-deepseek-key…</p>
+        <p><span>TRADINGOS_AI_BASE_URL</span>=https://api.deepseek.com</p>
+        <p><span>TRADINGOS_AI_MODEL</span>=deepseek-chat</p>
+      </div>
+      <div v-if="aiStatus" class="ai-readout">
+        <div class="ai-readout-row"><span>MODEL</span><strong class="mono">{{ aiStatus.model }}</strong></div>
+        <div class="ai-readout-row"><span>ENDPOINT</span><strong class="mono">{{ aiStatus.base_url ?? '—' }}</strong></div>
+        <div class="ai-readout-row"><span>API KEY</span><strong class="mono">{{ aiStatus.api_key_configured ? 'CONFIGURED (HIDDEN)' : 'NOT SET' }}</strong></div>
+        <div class="ai-readout-row"><span>TOKENS TODAY</span><strong class="mono">{{ aiStatus.budget.tokens_used_today }} / {{ aiStatus.budget.token_budget }}</strong></div>
+        <div class="ai-readout-row"><span>RUNS TODAY</span><strong class="mono">{{ aiStatus.budget.runs_today }} / {{ aiStatus.budget.run_limit }}</strong></div>
+      </div>
+      <div class="setup-actions">
+        <button class="setup-action setup-action--quiet" type="button" :disabled="!adminToken.trim()" @click="refreshAiStatus">RE-PROBE READINESS</button>
+      </div>
+    </section>
   </main>
 </template>
 
@@ -213,4 +254,10 @@ const isPracticeConnected = computed(() => connection.value?.state === 'CONNECTE
 .totp-qr :deep(svg) { display: block; width: 100%; height: auto; }
 .totp-hint { margin: 0 0 8px; font-size: 11px; color: var(--quiet); }
 @media (max-width: 640px) { .totp-provision-grid { grid-template-columns: 1fr; } }
+.ai-env-block { border: 1px solid rgba(235,232,223,.14); background: rgba(10,14,13,.55); padding: 14px 16px; margin: 14px 0; overflow-wrap: anywhere; }
+.ai-env-block p { margin: 3px 0; font-size: 12px; color: var(--paper); }
+.ai-env-block span { color: var(--brass, #b89a6a); }
+.ai-readout { display: grid; gap: 6px; margin: 6px 0 14px; }
+.ai-readout-row { display: flex; justify-content: space-between; gap: 12px; border-bottom: 1px dashed rgba(235,232,223,.12); padding: 5px 0; font-size: 12px; }
+.ai-readout-row span { color: var(--quiet); letter-spacing: .08em; }
 </style>

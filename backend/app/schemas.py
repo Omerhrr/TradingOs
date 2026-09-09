@@ -662,3 +662,80 @@ class AlertUnreadResponse(BaseModel):
 class AlertAckResponse(BaseModel):
     acknowledged: list[int]
     auto: bool = False
+
+
+class AlertRuleResponse(BaseModel):
+    """Operator-configurable rule for one alert code."""
+
+    id: int
+    code: str
+    enabled: bool
+    severity: str
+    cooldown_seconds: int | None = None
+    notify_webhook: bool
+    description: str
+    updated_at: datetime | None = None
+
+
+class AlertRuleListResponse(BaseModel):
+    rules: list[AlertRuleResponse]
+
+
+class AlertRuleUpdate(BaseModel):
+    """Partial alert-rule update; omitted fields keep their current value."""
+
+    enabled: bool | None = None
+    severity: str | None = Field(default=None, description="INFO, WARNING, or ERROR")
+    cooldown_seconds: int | None = Field(default=None, ge=5, le=86_400)
+    notify_webhook: bool | None = None
+
+
+class WebhookDeliveryResponse(BaseModel):
+    """One outbound webhook notification with its retry-policy state."""
+
+    id: int
+    alert_id: int | None = None
+    event: str
+    code: str
+    target_url: str
+    status: str
+    attempts: int
+    max_attempts: int
+    next_attempt_at: datetime | None = None
+    last_http_status: int | None = None
+    last_error: str | None = None
+    delivered_at: datetime | None = None
+    created_at: datetime
+
+
+class WebhookDeliveryListResponse(BaseModel):
+    deliveries: list[WebhookDeliveryResponse]
+
+
+class WebhookTestResponse(BaseModel):
+    delivery_id: int
+    target_url: str
+    status: str
+
+
+class WebhookPolicyResponse(BaseModel):
+    """The active retry policy plus whether a target and signing key exist."""
+
+    target_configured: bool
+    target_url: str | None = None
+    max_attempts: int
+    backoff_base_seconds: int
+    backoff_max_seconds: int
+    timeout_seconds: int
+    signing_enabled: bool
+
+
+class AIStatusResponse(BaseModel):
+    """LLM readiness probe. Never contains the API key itself."""
+
+    ai_enabled: bool
+    model: str
+    base_url: str | None = None
+    api_key_configured: bool
+    ready: bool
+    budget: dict

@@ -42,6 +42,15 @@ class Settings(BaseSettings):
     # POSTs it to an external webhook. Alerting must never break trading ops.
     alert_cooldown_seconds: int = Field(default=60, ge=5, le=3_600)
     alert_webhook_url: str | None = None
+    # Webhook retry policy: deliveries are persisted and retried in the
+    # background with exponential backoff (base * 2**(attempt-1), capped).
+    # The optional signing secret adds HMAC-SHA256 authenticity headers so a
+    # receiver can verify a notification really came from this control plane.
+    webhook_max_attempts: int = Field(default=5, ge=1, le=12)
+    webhook_backoff_base_seconds: int = Field(default=2, ge=1, le=60)
+    webhook_backoff_max_seconds: int = Field(default=300, ge=5, le=3_600)
+    webhook_timeout_seconds: int = Field(default=5, ge=1, le=30)
+    webhook_signing_secret: str | None = None
     ai_enabled: bool = False
     ai_model: str = "gpt-5-mini"
     ai_base_url: str | None = None

@@ -262,13 +262,14 @@ function socketEventNote(type: string, payload: Record<string, unknown>): string
         <a class="nav-link" href="#watchlist"><span>02</span> Watchlist</a>
         <a class="nav-link" href="#risk"><span>03</span> Risk policy</a>
         <a class="nav-link" href="#research"><span>04</span> Research</a>
-        <a class="nav-link" href="#loop"><span>05</span> Strategy loop<span v-if="unacknowledgedAlerts" class="alert-badge" :title="`${unacknowledgedAlerts} unacknowledged alert(s)`">{{ unacknowledgedAlerts > 9 ? '9+' : unacknowledgedAlerts }}</span></a>
-        <NuxtLink class="nav-link" to="/strategies"><span>06</span> Strategy desk</NuxtLink>
-        <NuxtLink class="nav-link" to="/analytics"><span>07</span> Outcome analytics</NuxtLink>
-        <NuxtLink class="nav-link" to="/compare"><span>08</span> Strategy compare</NuxtLink>
-        <NuxtLink class="nav-link" to="/backtest"><span>09</span> Backtest lab</NuxtLink>
-        <a class="nav-link" href="#evidence"><span>10</span> Evidence log</a>
-        <NuxtLink class="nav-link" to="/setup"><span>11</span> Local setup</NuxtLink>
+        <a class="nav-link" href="#loop"><span>05</span> Strategy loop</a>
+        <NuxtLink class="nav-link" to="/alerts"><span>06</span> Alert center<span v-if="unacknowledgedAlerts" class="alert-badge" :title="`${unacknowledgedAlerts} unacknowledged alert(s)`">{{ unacknowledgedAlerts > 9 ? '9+' : unacknowledgedAlerts }}</span></NuxtLink>
+        <NuxtLink class="nav-link" to="/strategies"><span>07</span> Strategy desk</NuxtLink>
+        <NuxtLink class="nav-link" to="/analytics"><span>08</span> Outcome analytics</NuxtLink>
+        <NuxtLink class="nav-link" to="/compare"><span>09</span> Strategy compare</NuxtLink>
+        <NuxtLink class="nav-link" to="/backtest"><span>10</span> Backtest lab</NuxtLink>
+        <a class="nav-link" href="#evidence"><span>11</span> Evidence log</a>
+        <NuxtLink class="nav-link" to="/setup"><span>12</span> Local setup</NuxtLink>
       </nav>
 
       <div class="rail-foot">
@@ -485,6 +486,7 @@ function socketEventNote(type: string, payload: Record<string, unknown>): string
           <div class="guard-alerts" aria-label="Operational alerts">
             <div class="guard-alerts-head">
               <p class="mono micro ws-feed-title">OPERATIONAL ALERTS<span v-if="unacknowledgedAlerts" class="alert-count">{{ unacknowledgedAlerts > 9 ? '9+' : unacknowledgedAlerts }}</span></p>
+              <NuxtLink class="mini-control" to="/alerts">ALERT CENTER</NuxtLink>
               <button v-if="unacknowledgedAlerts" class="mini-control" type="button" :disabled="ackingAll" @click="acknowledgeAllAlerts">{{ ackingAll ? 'CLEARING…' : 'ACK ALL' }}</button>
             </div>
             <div v-for="alert in visibleAlerts" :key="alert.id" :class="['alert-item', { 'alert-item--acked': alert.acknowledged }]">

@@ -14,8 +14,8 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.database import Base, SessionLocal, engine, get_session
-from app.models import AIResearchRun, AccountConfig, AccountSnapshot, Alert, AuditEvent, Candle, EncryptedBrokerCredential, FeatureSnapshot, LoopRun, MarketAsset, OrderIntent, OrderRecord, PositionSnapshot, ReconciliationRun, RiskPolicy, StrategyEvaluation, StrategyVersion, SystemState, TradeOutcome, TwoFactorSecret, WatchlistItem
-from app.schemas import AccountStateResponse, AlertAckResponse, AlertListResponse, AlertResponse, AlertUnreadResponse, AuditEventResponse, AuthLoginInput, AuthLoginResponse, AuthSessionResponse, BacktestRunInput, BacktestRunResponse, BacktestSweepInput, BacktestSweepResponse, BrokerConnectionResponse, BrokerCredentialInput, CandleResponse, FeatureResponse, HealthResponse, LoopRunResponse, LoopStatusResponse, MarketAssetResponse, MarketChartResponse, OrderIntentInput, OrderIntentResponse, OrderResponse, PositionResponse, ReconciliationResponse, ResearchRunResponse, RiskPolicyResponse, SavedPickCellResponse, StrategyComparisonResponse, StrategyCreateInput, StrategyEvaluationInput, StrategyEvaluationResponse, StrategyEvidenceResponse, StrategyFromSweepInput, StrategyResponse, StrategyStatusUpdateInput, SweepPickRecordResponse, SweepPickSaveResponse, SweepRunRecordResponse, SymbolDrilldownResponse, TotpProvisionResponse, TotpStatusResponse, TradeAnalyticsResponse, TradeResponse, WatchlistItemResponse, WatchlistUpdate
+from app.models import AIResearchRun, AccountConfig, AccountSnapshot, Alert, AlertRule, AuditEvent, Candle, EncryptedBrokerCredential, FeatureSnapshot, LoopRun, MarketAsset, OrderIntent, OrderRecord, PositionSnapshot, ReconciliationRun, RiskPolicy, StrategyEvaluation, StrategyVersion, SystemState, TradeOutcome, TwoFactorSecret, WatchlistItem, WebhookDelivery
+from app.schemas import AccountStateResponse, AIStatusResponse, AlertAckResponse, AlertListResponse, AlertResponse, AlertRuleListResponse, AlertRuleResponse, AlertRuleUpdate, AlertUnreadResponse, AuditEventResponse, AuthLoginInput, AuthLoginResponse, AuthSessionResponse, BacktestRunInput, BacktestRunResponse, BacktestSweepInput, BacktestSweepResponse, BrokerConnectionResponse, BrokerCredentialInput, CandleResponse, FeatureResponse, HealthResponse, LoopRunResponse, LoopStatusResponse, MarketAssetResponse, MarketChartResponse, OrderIntentInput, OrderIntentResponse, OrderResponse, PositionResponse, ReconciliationResponse, ResearchRunResponse, RiskPolicyResponse, SavedPickCellResponse, StrategyComparisonResponse, StrategyCreateInput, StrategyEvaluationInput, StrategyEvaluationResponse, StrategyEvidenceResponse, StrategyFromSweepInput, StrategyResponse, StrategyStatusUpdateInput, SweepPickRecordResponse, SweepPickSaveResponse, SweepRunRecordResponse, SymbolDrilldownResponse, TotpProvisionResponse, TotpStatusResponse, TradeAnalyticsResponse, TradeResponse, WatchlistItemResponse, WatchlistUpdate, WebhookDeliveryListResponse, WebhookDeliveryResponse, WebhookPolicyResponse, WebhookTestResponse
 from app.services.analytics import strategy_comparison, symbol_drilldown, trade_analytics
 from app.services.auth import SESSION_COOKIE, LoginGate, SessionConfigurationError, SessionManager, credential_ok, generate_totp_secret, otpauth_uri, totp_qr_svg, totp_verify
 from app.services import alerts as alerting
@@ -25,6 +25,8 @@ from app.services.credentials import BrokerCredentials, CredentialConfigurationE
 from app.services.evidence import StrategyMissing, evidence_csv, evidence_pdf, strategy_evidence
 from app.services.events import event_bus, publish_event
 from app.services.market_view import market_chart
+from app.services import webhooks
+from app.services.webhooks import WebhookDispatcher
 from app.services.worker import BrokerWorker
 from app.services.strategy import evaluate_strategy, persist_features, utc_now
 from app.services.research import ResearchBudgetExceeded, ResearchService
@@ -38,6 +40,8 @@ worker = BrokerWorker(IQAirBrokerAdapter(), settings.broker_candle_count)
 loop_engine = LoopEngine(worker, settings)
 runtime = LocalRuntime(settings, SessionLocal, worker, loop_engine)
 login_gate = LoginGate()
+webhook_dispatcher = WebhookDispatcher(SessionLocal, settings)
+webhooks.register_dispatcher(webhook_dispatcher)
 
 
 def _seed_control_plane(session: Session) -> None:
@@ -48,6 +52,9 @@ def _seed_control_plane(session: Session) -> None:
     session.flush()
     if session.scalar(select(AuditEvent.id).limit(1)) is None:
         session.add(AuditEvent(event_type="SYSTEM_BOOTSTRAPPED", severity="INFO", message="Practice-first control plane initialized; broker execution remains disabled.", payload={"real_execution_enabled": False}))
+    # Alert rules seed from the manifest; missing rows would fall back to the
+    # built-in defaults, so this is a convenience for the alert center UI.
+    alerting.ensure_alert_rules(session)
     session.commit()
 
 
@@ -59,9 +66,11 @@ async def lifespan(_: FastAPI):
     # Bind the event bus to this loop so worker threads can reach WebSocket senders.
     event_bus.attach_loop(asyncio.get_running_loop())
     runtime.start()
+    webhook_dispatcher.start()
     try:
         yield
     finally:
+        webhook_dispatcher.stop()
         runtime.stop()
 
 
@@ -703,11 +712,21 @@ def list_loop_runs(session: Session = Depends(get_session)) -> list[LoopRun]:
 
 
 @app.get(f"{settings.api_prefix}/alerts", response_model=AlertListResponse, tags=["alerts"])
-def list_alerts(unacknowledged_only: bool = Query(default=False), limit: int = Query(default=50, ge=1, le=200), session: Session = Depends(get_session)) -> dict:
+def list_alerts(
+    unacknowledged_only: bool = Query(default=False),
+    severity: str | None = Query(default=None, description="Filter by severity (INFO/WARNING/ERROR)."),
+    code: str | None = Query(default=None, description="Filter by alert code."),
+    limit: int = Query(default=50, ge=1, le=200),
+    session: Session = Depends(get_session),
+) -> dict:
     """Operational alerts, newest first, with the unacknowledged count."""
     statement = select(Alert).order_by(Alert.id.desc()).limit(limit)
     if unacknowledged_only:
         statement = statement.where(Alert.acknowledged_at.is_(None))
+    if severity:
+        statement = statement.where(Alert.severity == severity.upper())
+    if code:
+        statement = statement.where(Alert.code == code.upper())
     rows = list(session.scalars(statement))
     unacknowledged = session.scalar(select(func.count()).select_from(Alert).where(Alert.acknowledged_at.is_(None))) or 0
     return {"alerts": [alerting.serialize_alert(alert) for alert in rows], "unacknowledged": unacknowledged}
@@ -731,6 +750,134 @@ def acknowledge_one_alert(alert_id: int, session: Session = Depends(get_session)
 @app.post(f"{settings.api_prefix}/alerts/ack-all", response_model=AlertAckResponse, dependencies=[Depends(_require_local_admin)], tags=["alerts"])
 def acknowledge_all_alerts(session: Session = Depends(get_session)) -> dict:
     return {"acknowledged": alerting.acknowledge_all(session, settings), "auto": False}
+
+
+@app.get(f"{settings.api_prefix}/alerts/rules", response_model=AlertRuleListResponse, tags=["alerts"])
+def list_alert_rules(session: Session = Depends(get_session)) -> dict:
+    """Operator-configurable rules, one row per known alert code."""
+    rules = list(session.scalars(select(AlertRule).order_by(AlertRule.id)))
+    return {"rules": [alerting.serialize_rule(rule) for rule in rules]}
+
+
+@app.put(f"{settings.api_prefix}/alerts/rules/{{code}}", response_model=AlertRuleResponse, dependencies=[Depends(_require_local_admin)], tags=["alerts"])
+def update_alert_rule(code: str, payload: AlertRuleUpdate, session: Session = Depends(get_session)) -> dict:
+    """Partial update of one alert rule; omitted fields keep their value."""
+    try:
+        rule = alerting.update_alert_rule(
+            session,
+            settings,
+            code.upper(),
+            enabled=payload.enabled,
+            severity=payload.severity,
+            cooldown_seconds=payload.cooldown_seconds,
+            notify_webhook=payload.notify_webhook,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return alerting.serialize_rule(rule)
+
+
+@app.get(f"{settings.api_prefix}/alerts/deliveries", response_model=WebhookDeliveryListResponse, tags=["alerts"])
+def list_webhook_deliveries(limit: int = Query(default=30, ge=1, le=200), session: Session = Depends(get_session)) -> dict:
+    """Recent outbound webhook notifications with their retry state, newest first."""
+    rows = list(session.scalars(select(WebhookDelivery).order_by(WebhookDelivery.id.desc()).limit(limit)))
+    return {"deliveries": [
+        {
+            "id": row.id,
+            "alert_id": row.alert_id,
+            "event": row.event,
+            "code": row.code,
+            "target_url": row.target_url,
+            "status": row.status,
+            "attempts": row.attempts,
+            "max_attempts": row.max_attempts,
+            "next_attempt_at": row.next_attempt_at,
+            "last_http_status": row.last_http_status,
+            "last_error": row.last_error,
+            "delivered_at": row.delivered_at,
+            "created_at": row.created_at,
+        }
+        for row in rows
+    ]}
+
+
+@app.post(f"{settings.api_prefix}/alerts/deliveries/{{delivery_id}}/retry", response_model=WebhookDeliveryResponse, dependencies=[Depends(_require_local_admin)], tags=["alerts"])
+def retry_webhook_delivery(delivery_id: int, session: Session = Depends(get_session)) -> dict:
+    """Reopen a delivery with a fresh attempt budget; the dispatcher picks it up."""
+    try:
+        delivery = webhooks.retry_delivery(session, settings, delivery_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    webhooks.wake_dispatcher()
+    return {
+        "id": delivery.id,
+        "alert_id": delivery.alert_id,
+        "event": delivery.event,
+        "code": delivery.code,
+        "target_url": delivery.target_url,
+        "status": delivery.status,
+        "attempts": delivery.attempts,
+        "max_attempts": delivery.max_attempts,
+        "next_attempt_at": delivery.next_attempt_at,
+        "last_http_status": delivery.last_http_status,
+        "last_error": delivery.last_error,
+        "delivered_at": delivery.delivered_at,
+        "created_at": delivery.created_at,
+    }
+
+
+@app.get(f"{settings.api_prefix}/alerts/webhook/policy", response_model=WebhookPolicyResponse, tags=["alerts"])
+def webhook_policy() -> dict:
+    """The active webhook retry policy as configured through the environment."""
+    return {
+        "target_configured": bool(settings.alert_webhook_url),
+        "target_url": settings.alert_webhook_url,
+        "max_attempts": settings.webhook_max_attempts,
+        "backoff_base_seconds": settings.webhook_backoff_base_seconds,
+        "backoff_max_seconds": settings.webhook_backoff_max_seconds,
+        "timeout_seconds": settings.webhook_timeout_seconds,
+        "signing_enabled": bool(settings.webhook_signing_secret),
+    }
+
+
+@app.post(f"{settings.api_prefix}/alerts/webhook/test", response_model=WebhookTestResponse, dependencies=[Depends(_require_local_admin)], tags=["alerts"])
+def test_webhook(session: Session = Depends(get_session)) -> dict:
+    """Enqueue a self-contained TEST delivery so the operator can verify the whole chain."""
+    if not settings.alert_webhook_url:
+        raise HTTPException(status_code=409, detail="No webhook target configured. Set TRADINGOS_ALERT_WEBHOOK_URL first.")
+    delivery = webhooks.enqueue_delivery(session, settings, event="test", code="WEBHOOK_TEST")
+    if delivery is None:  # defensive: the 409 above already guards this
+        raise HTTPException(status_code=409, detail="No webhook target configured. Set TRADINGOS_ALERT_WEBHOOK_URL first.")
+    session.add(AuditEvent(event_type="WEBHOOK_TEST_QUEUED", severity="INFO", message="A TEST webhook delivery was queued by the operator.", payload={"delivery_id": delivery.id}))
+    session.commit()
+    webhooks.wake_dispatcher()
+    return {"delivery_id": delivery.id, "target_url": delivery.target_url, "status": delivery.status}
+
+
+@app.get(f"{settings.api_prefix}/ai/status", response_model=AIStatusResponse, dependencies=[Depends(_require_local_admin)], tags=["research"])
+def ai_status(session: Session = Depends(get_session)) -> dict:
+    """LLM readiness probe for the research path. Never contains the API key."""
+    used_tokens, used_runs = ResearchService(settings)._usage_before_today(session)
+    enabled = settings.ai_enabled
+    key_ready = bool(settings.ai_api_key)
+    endpoint_ready = bool(settings.ai_base_url)
+    return {
+        "ai_enabled": enabled,
+        "model": settings.ai_model,
+        "base_url": settings.ai_base_url,
+        "api_key_configured": key_ready,
+        "ready": enabled and key_ready and endpoint_ready,
+        "budget": {
+            "tokens_used_today": used_tokens,
+            "token_budget": settings.ai_daily_token_budget,
+            "runs_today": used_runs,
+            "run_limit": settings.ai_daily_run_limit,
+        },
+    }
 
 
 @app.get(f"{settings.api_prefix}/account/snapshots", tags=["account"])

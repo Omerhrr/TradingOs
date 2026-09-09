@@ -41,6 +41,29 @@ Every strategy version can export its evidence as a report of record: `GET /api/
 
 Loop guards now speak up. A skipped tick (paused system, missing PRACTICE mode, disconnected broker) raises a `LOOP_GUARD_TRIPPED` alert, a broken tick raises `LOOP_TICK_FAILED`, and a failed order submission raises `LOOP_SUBMIT_ERROR`. Raising is deduplicated inside `TRADINGOS_ALERT_COOLDOWN_SECONDS` (default 60s: one alert grows an `occurrences` counter instead of flooding the ledger), a guard alert auto-resolves the moment a later tick passes its guards, and every raise/ack/resolution is audited. Alerts stream to the UI over the existing WebSocket channel (`alert.raised` / `alert.acknowledged`), surface as a panel and a nav badge on the control plane, and can be POSTed to an external endpoint with `TRADINGOS_ALERT_WEBHOOK_URL` (fire-and-forget, never breaks trading ops).
 
+## Alert center, webhook retry policy, and alert rules
+
+Alerting graduated from a fire-and-forget webhook POST to an operable subsystem with its own page (`/alerts`):
+
+* **Webhook retry policy.** Every notification is a persisted `WebhookDelivery` row enqueued in the same transaction as its alert, and a background dispatcher retries with exponential backoff (`TRADINGOS_WEBHOOK_BACKOFF_BASE_SECONDS` * 2^(attempt-1), capped by `TRADINGOS_WEBHOOK_BACKOFF_MAX_SECONDS`) until `TRADINGOS_WEBHOOK_MAX_ATTEMPTS` is reached, then marks the row EXHAUSTED and audits `WEBHOOK_EXHAUSTED`. An operator can reopen any delivery with a fresh attempt budget via `POST /api/v1/alerts/deliveries/{id}/retry` (or the RETRY button on `/alerts`), and `POST /api/v1/alerts/webhook/test` queues a self-contained TEST delivery. When `TRADINGOS_WEBHOOK_SIGNING_SECRET` is set, each POST carries `X-TradingOS-Signature: sha256=<hmac_sha256(secret, body)>` so the receiver can verify authenticity.
+* **Alert-rule configuration.** Each known code (LOOP_GUARD_TRIPPED, LOOP_TICK_FAILED, LOOP_SUBMIT_ERROR) has a persisted rule: enabled/disabled (silenced codes raise nothing at all), severity override, per-rule cooldown override, and a per-rule webhook on/off. Rules are seeded from a manifest at boot, listed at `GET /api/v1/alerts/rules`, and updated with `PUT /api/v1/alerts/rules/{code}` — no restart, no redeploy. Missing rows fall back to the built-in defaults.
+* **The /alerts page** ties it together: filterable alert ledger (severity, open/acked, code) with per-row ACK and ACK ALL, the rule editor, and the delivery ledger with attempts, next-retry time, HTTP status, last error, and per-row RETRY. It refreshes live over the WebSocket channel (`alert.*`, `webhook.delivered`, `webhook.exhausted`).
+
+## LLM (DeepSeek) and broker credentials
+
+The optional AI research path already speaks any OpenAI-compatible endpoint through airpy's `OpenAIProvider` — DeepSeek's API is directly compatible (including the JSON-mode response format the structured proposal uses). To connect a DeepSeek key:
+
+```
+TRADINGOS_AI_ENABLED=true
+TRADINGOS_AI_API_KEY=sk-your-deepseek-key
+TRADINGOS_AI_BASE_URL=https://api.deepseek.com
+TRADINGOS_AI_MODEL=deepseek-chat
+```
+
+Restart the backend, then verify readiness on the Local setup page's "AI RESEARCH" card (`GET /api/v1/ai/status` reports enabled/model/endpoint/key-configured plus today's token and run budget — the key itself never leaves the server). Research remains bounded: daily token budget (`TRADINGOS_AI_DAILY_TOKEN_BUDGET`), daily run limit, prompt truncation, deduped identical requests, and a hypotheses-only output contract with no broker or order access.
+
+IQ Option credentials are stored end-to-end encrypted (Fernet, `TRADINGOS_CREDENTIAL_ENCRYPTION_KEY`) via the Local setup page: enter email + password, press STORE ENCRYPTED CREDENTIALS, then CONNECT TO PRACTICE (the adapter refuses anything that is not explicitly PRACTICE), then RUN RECONCILIATION. The password is cleared from the browser after storage and is only decrypted in-memory at connect time.
+
 ## VDS migration contract
 
 The application has no hard-coded hostnames, database paths, or broker configuration in source. A VDS move consists of copying the repository and encrypted database backup, providing the same environment variables through the VDS secret manager, installing the declared Python and Node dependencies, and running the API and frontend under a process supervisor and reverse proxy.

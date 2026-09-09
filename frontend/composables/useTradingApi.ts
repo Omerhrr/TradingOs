@@ -1,5 +1,5 @@
 // TradingOS follows The Instrument Room: guarded, low-key, evidence-first operational design.
-import type { AlertList, AuditEvent, AuthLogin, AuthSession, BacktestRun, BacktestSweep, BrokerConnection, BrokerCredentialInput, LoopRun, LoopStatus, MarketChart, OrderIntent, PositionSnapshot, ReconciliationRun, ResearchRun, RiskPolicy, SavedPickCell, StrategyComparison, StrategyDefinition, StrategyEvaluation, StrategyStatusInput, StrategyVersion, SweepPickRecord, SweepPickSave, SweepRunRecord, SymbolDrilldown, SystemState, TotpProvision, TotpStatus, TradeAnalytics, WatchlistItem } from '~/types/trading'
+import type { AIStatus, AlertList, AlertRuleList, AlertRuleUpdateInput, AuditEvent, AuthLogin, AuthSession, BacktestRun, BacktestSweep, BrokerConnection, BrokerCredentialInput, LoopRun, LoopStatus, MarketChart, OrderIntent, PositionSnapshot, ReconciliationRun, ResearchRun, RiskPolicy, SavedPickCell, StrategyComparison, StrategyDefinition, StrategyEvaluation, StrategyStatusInput, StrategyVersion, SweepPickRecord, SweepPickSave, SweepRunRecord, SymbolDrilldown, SystemState, TotpProvision, TotpStatus, TradeAnalytics, WatchlistItem, WebhookDeliveryList, WebhookPolicy } from '~/types/trading'
 
 export function useTradingApi() {
   const config = useRuntimeConfig()
@@ -56,6 +56,22 @@ export function useTradingApi() {
       request<SavedPickCell[]>(`/backtest/picks?symbol=${encodeURIComponent(symbol)}&timeframe_seconds=${timeframeSeconds}&censor_gap_seconds=${censorGapSeconds}`),
     getStrategySweepHistory: (strategyId: number) => request<SweepPickRecord[]>(`/strategies/${strategyId}/sweep-history`),
     getAlerts: (unacknowledgedOnly = false) => request<AlertList>(`/alerts${unacknowledgedOnly ? '?unacknowledged_only=true' : ''}`),
+    getAlertsFiltered: (query: { unacknowledged_only?: boolean; severity?: string; code?: string; limit?: number }) => {
+      const params = new URLSearchParams()
+      if (query.unacknowledged_only) params.set('unacknowledged_only', 'true')
+      if (query.severity) params.set('severity', query.severity)
+      if (query.code) params.set('code', query.code)
+      if (query.limit) params.set('limit', String(query.limit))
+      const qs = params.toString()
+      return request<AlertList>(`/alerts${qs ? `?${qs}` : ''}`)
+    },
+    getAlertRules: () => request<AlertRuleList>('/alerts/rules'),
+    updateAlertRule: (adminToken: string, code: string, payload: AlertRuleUpdateInput) => localControl<unknown>(`/alerts/rules/${encodeURIComponent(code)}`, adminToken, { method: 'PUT', body: payload }),
+    getWebhookDeliveries: (limit = 30) => request<WebhookDeliveryList>(`/alerts/deliveries?limit=${limit}`),
+    retryWebhookDelivery: (adminToken: string, deliveryId: number) => localControl<unknown>(`/alerts/deliveries/${deliveryId}/retry`, adminToken, { method: 'POST' }),
+    getWebhookPolicy: () => request<WebhookPolicy>('/alerts/webhook/policy'),
+    sendTestWebhook: (adminToken: string) => localControl<{ delivery_id: number; target_url: string; status: string }>('/alerts/webhook/test', adminToken, { method: 'POST' }),
+    getAiStatus: (adminToken: string) => localControl<AIStatus>('/ai/status', adminToken),
     ackAlert: (adminToken: string, alertId: number) => localControl<{ acknowledged: number[] }>(`/alerts/${alertId}/ack`, adminToken, { method: 'POST' }),
     ackAllAlerts: (adminToken: string) => localControl<{ acknowledged: number[] }>('/alerts/ack-all', adminToken, { method: 'POST' }),
     // The evidence exports are report-of-record downloads: fetched as a blob

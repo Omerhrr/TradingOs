@@ -96,7 +96,9 @@ class LoopEngine:
             # cooldown window so a runtime-driven loop cannot flood the ledger.
             try:
                 alert = alerting.raise_alert(session, self.settings, code=alerting.GUARD_TRIPPED, severity="WARNING", message=guards, payload={"skipped": True})
-                guard_alert = {"alert_id": alert.id, "occurrences": alert.occurrences}
+                # raise_alert returns None when the operator silenced this code
+                # via its alert rule; the tick still records the skip reason.
+                guard_alert = {"alert_id": alert.id, "occurrences": alert.occurrences} if alert is not None else None
             except Exception:  # noqa: BLE001 — alerting must never break the tick
                 guard_alert = None
             return {"skipped": True, "reason": guards, "guard_alert": guard_alert}
