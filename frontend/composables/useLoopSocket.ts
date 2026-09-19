@@ -5,7 +5,7 @@
 //   - every loop/execution/system event is appended to a bounded ring buffer,
 //   - reconnects use capped backoff so a dead backend cannot spin the tab,
 //   - a client "ping" every 25s keeps proxies from idling the socket out.
-import { computed, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import type { LoopSocketEvent } from '~/types/trading'
 
 export type LoopSocketStatus = 'connecting' | 'live' | 'offline'
@@ -37,6 +37,10 @@ function clearTimers() {
 }
 
 function record(event: LoopSocketEvent) {
+  // Protocol frames (hello snapshot, pong) carry no timestamp and are not
+  // operator-facing events: rendering them would show "Invalid Date" rows,
+  // so they never enter the ring buffer.
+  if (typeof event.ts !== 'string' || !event.ts) return
   events.value = [event, ...events.value].slice(0, EVENT_BUFFER_LIMIT)
 }
 
@@ -113,11 +117,17 @@ export function restartLoopSocket() {
 export function useLoopSocket() {
   if (import.meta.client && !started) {
     started = true
-    open()
-    window.addEventListener('beforeunload', () => {
-      clearTimers()
-      socket?.close()
-      socket = null
+    // Open after mount, never during setup: the status chip is part of the
+    // rendered tree, and opening synchronously flips "offline" to
+    // "connecting" before hydration - Vue then flags the chip as a
+    // hydration mismatch (server rendered POLLING, client LINKING…).
+    onMounted(() => {
+      open()
+      window.addEventListener('beforeunload', () => {
+        clearTimers()
+        socket?.close()
+        socket = null
+      })
     })
   }
 

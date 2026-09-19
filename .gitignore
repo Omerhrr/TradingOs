@@ -13,3 +13,6 @@ frontend/.output/
 frontend/node_modules/
 frontend/.env
 .venv/
+api.log
+ui.log
+stack-keeper.log

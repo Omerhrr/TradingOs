@@ -26,7 +26,7 @@ const selectedPair = ref('')
 const { data: state, pending: statePending, error: stateError, refresh: refreshState } = await useAsyncData<SystemState>('trading-state', api.getState)
 const { data: risk, error: riskError } = await useAsyncData<RiskPolicy>('risk-policy', api.getRisk)
 const { data: events, refresh: refreshEvents } = await useAsyncData<AuditEvent[]>('audit-events', api.getEvents)
-const { data: watchlist } = await useAsyncData<WatchlistItem[]>('watchlist', api.getWatchlist)
+const { data: watchlist, refresh: refreshWatchlist } = await useAsyncData<WatchlistItem[]>('watchlist', api.getWatchlist)
 const { data: strategies } = await useAsyncData<StrategyVersion[]>('strategies', api.getStrategies)
 const { data: intents, refresh: refreshIntents } = await useAsyncData<OrderIntent[]>('order-intents', api.getOrderIntents)
 const { data: positions } = await useAsyncData<PositionSnapshot[]>('positions', api.getPositions)
@@ -218,6 +218,69 @@ watch(socketEvents, (list) => {
   }
 })
 
+// --- Watchlist editor ---------------------------------------------------
+// The PUT contract is replace-all, so the editor keeps a local draft of the
+// whole observation set and submits it in one shot on save. No admin token:
+// watchlist shaping is a local-first control by design.
+interface WatchDraftItem { symbol: string; category: string; timeframe_seconds: number; enabled: boolean }
+const SYMBOL_PATTERN = /^[A-Za-z0-9._/-]+$/
+const watchEditing = ref(false)
+const watchSaving = ref(false)
+const watchError = ref<string | null>(null)
+const watchDraft = ref<WatchDraftItem[]>([])
+const watchNewSymbol = ref('')
+const watchNewTimeframe = ref(60)
+const watchNewCategory = ref('forex')
+
+function startWatchEdit() {
+  watchDraft.value = (watchlist.value ?? []).map((item) => ({ symbol: item.symbol, category: item.category, timeframe_seconds: item.timeframe_seconds, enabled: item.enabled }))
+  watchNewSymbol.value = ''
+  watchNewTimeframe.value = 60
+  watchNewCategory.value = 'forex'
+  watchError.value = null
+  watchEditing.value = true
+}
+
+function addWatchDraft() {
+  const symbol = watchNewSymbol.value.trim().toUpperCase()
+  const timeframe = Math.floor(Number(watchNewTimeframe.value))
+  if (!symbol) { watchError.value = 'A symbol is required before it can be observed.'; return }
+  if (!SYMBOL_PATTERN.test(symbol)) { watchError.value = 'Symbols may only use letters, digits, dots, dashes, slashes, and underscores.'; return }
+  if (!Number.isFinite(timeframe) || timeframe < 1 || timeframe > 86_400) { watchError.value = 'Timeframe must be between 1 and 86400 seconds.'; return }
+  if (watchDraft.value.some((item) => item.symbol === symbol && item.timeframe_seconds === timeframe)) {
+    watchError.value = `${symbol} on the ${timeframe}s timeframe is already in this draft.`
+    return
+  }
+  if (watchDraft.value.length >= 50) { watchError.value = 'The control plane accepts at most 50 watchlist entries.'; return }
+  watchError.value = null
+  watchDraft.value.push({ symbol, category: watchNewCategory.value.trim().toLowerCase() || 'forex', timeframe_seconds: timeframe, enabled: true })
+  watchNewSymbol.value = ''
+}
+
+function removeWatchDraft(index: number) {
+  watchDraft.value.splice(index, 1)
+}
+
+function cancelWatchEdit() {
+  watchEditing.value = false
+  watchError.value = null
+}
+
+async function saveWatchEdit() {
+  watchSaving.value = true
+  watchError.value = null
+  try {
+    await api.updateWatchlist({ items: watchDraft.value.map((item) => ({ ...item })) })
+    await Promise.all([refreshWatchlist(), refreshEvents()])
+    watchEditing.value = false
+  } catch (error) {
+    const detail = (error as { data?: { detail?: string } })?.data?.detail
+    watchError.value = detail ?? 'The control plane rejected the watchlist. Nothing was changed.'
+  } finally {
+    watchSaving.value = false
+  }
+}
+
 const socketChipLabel = computed(() => {
   if (socketStatus.value === 'live') return 'LIVE'
   if (socketStatus.value === 'connecting') return 'LINKING…'
@@ -349,17 +412,54 @@ function socketEventNote(type: string, payload: Record<string, unknown>): string
             </div>
             <span class="panel-index">W-02</span>
           </div>
-          <div v-if="watchlist?.length" class="watchlist">
+
+          <template v-if="watchEditing">
+            <div class="watch-editor">
+              <p class="watch-editor-hint">Replaces the whole observation set in one commit. Disabled pairs stay listed but the worker skips them.</p>
+              <div v-for="(item, index) in watchDraft" :key="`${item.symbol}-${item.timeframe_seconds}`" class="watch-editor-row">
+                <strong>{{ item.symbol }}</strong>
+                <input v-model="item.category" type="text" maxlength="40" aria-label="category">
+                <input v-model.number="item.timeframe_seconds" type="number" min="1" max="86400" aria-label="timeframe seconds">
+                <div class="watch-editor-tools">
+                  <label class="watch-editor-toggle" title="Enabled pairs are observed by the worker"><input v-model="item.enabled" type="checkbox">ON</label>
+                  <button class="mini-control mini-control--danger" type="button" :disabled="watchSaving" @click="removeWatchDraft(index)">DROP</button>
+                </div>
+              </div>
+              <p v-if="!watchDraft.length" class="watch-editor-hint">The draft is empty — the worker will have nothing to observe.</p>
+              <div class="watch-editor-add">
+                <input v-model="watchNewSymbol" type="text" placeholder="EURUSD" maxlength="40" aria-label="new symbol" @keyup.enter="addWatchDraft">
+                <input v-model="watchNewCategory" type="text" placeholder="forex" maxlength="40" aria-label="new category">
+                <input v-model.number="watchNewTimeframe" type="number" min="1" max="86400" aria-label="new timeframe seconds">
+                <div class="watch-editor-tools">
+                  <button class="mini-control" type="button" :disabled="watchSaving" @click="addWatchDraft">ADD PAIR</button>
+                </div>
+              </div>
+              <p v-if="watchError" class="error-note watch-editor-error">{{ watchError }}</p>
+              <div class="watch-editor-actions">
+                <button class="mini-control" type="button" :disabled="watchSaving" @click="saveWatchEdit">{{ watchSaving ? 'COMMITTING…' : 'COMMIT WATCHLIST' }}</button>
+                <button class="mini-control" type="button" :disabled="watchSaving" @click="cancelWatchEdit">CANCEL</button>
+              </div>
+            </div>
+          </template>
+
+          <div v-else-if="watchlist?.length" class="watchlist">
             <div v-for="item in watchlist" :key="item.id" class="watch-item">
               <span class="watch-led" :class="{ 'watch-led--off': !item.enabled }"></span>
               <strong>{{ item.symbol }}</strong>
               <span>{{ item.category }}</span>
               <span class="mono">{{ item.timeframe_seconds }}S</span>
             </div>
+            <div class="watch-manage">
+              <button class="mini-control" type="button" @click="startWatchEdit">MANAGE OBSERVATION SET</button>
+            </div>
           </div>
+
           <div v-else class="empty-watchlist">
             <span class="empty-glyph">+</span>
-            <p>No pairs are selected. Add a practice watchlist through the control-plane API before market observation begins.</p>
+            <p>No pairs are selected yet. Open the editor and add the first observation before market intelligence begins.</p>
+            <div class="watch-manage">
+              <button class="mini-control" type="button" @click="startWatchEdit">OPEN THE WATCHLIST EDITOR</button>
+            </div>
           </div>
         </section>
       </div>
@@ -540,3 +640,21 @@ function socketEventNote(type: string, payload: Record<string, unknown>): string
     </main>
   </div>
 </template>
+
+<style scoped>
+.watch-manage { display: flex; justify-content: flex-end; padding: 4px 6px 12px; border-top: 1px solid var(--line); }
+.empty-watchlist .watch-manage { justify-content: flex-start; border-top: 0; padding: 14px 0 0; }
+.watch-editor { display: grid; gap: 10px; padding: 6px 16px 18px; }
+.watch-editor-hint { margin: 0; color: var(--quiet); font-size: 11px; line-height: 1.6; }
+.watch-editor-row, .watch-editor-add { display: grid; grid-template-columns: 76px minmax(56px, 1fr) 64px auto; gap: 6px; align-items: center; padding: 9px 0; border-top: 1px solid var(--line); }
+.watch-editor-row strong, .watch-editor-add input[aria-label="new symbol"] { font-family: 'DM Mono', monospace; font-weight: 500; font-size: 12px; letter-spacing: .04em; }
+.watch-editor-row input, .watch-editor-add input { background: rgba(8, 10, 10, .8); border: 1px solid var(--line); color: var(--paper); font: 11px 'DM Mono', monospace; letter-spacing: .04em; padding: 7px 8px; outline: none; min-width: 0; width: 100%; box-sizing: border-box; }
+.watch-editor-row input:focus, .watch-editor-add input:focus { outline: 1px solid rgba(184, 154, 106, .55); outline-offset: 1px; }
+.watch-editor-tools { display: inline-flex; gap: 6px; align-items: center; justify-content: flex-end; }
+.watch-editor-toggle { display: inline-flex; gap: 5px; align-items: center; color: var(--quiet); font-family: 'DM Mono', monospace; font-size: 9px; letter-spacing: .06em; white-space: nowrap; cursor: pointer; }
+.watch-editor-toggle input { width: auto; accent-color: #83bbb0; }
+.watch-editor-add { border-top: 0; padding-top: 2px; }
+.watch-editor-error { margin: 0; }
+.watch-editor-actions { display: flex; gap: 10px; justify-content: flex-end; }
+@media (max-width: 620px) { .watch-editor-row, .watch-editor-add { grid-template-columns: 1fr 1fr; } .watch-editor-actions { justify-content: stretch; } }
+</style>
