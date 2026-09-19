@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import re
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect, status
@@ -15,7 +16,7 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.database import Base, SessionLocal, engine, get_session
 from app.models import AIResearchRun, AccountConfig, AccountSnapshot, Alert, AlertRule, AuditEvent, Candle, EncryptedBrokerCredential, FeatureSnapshot, LoopRun, MarketAsset, OrderIntent, OrderRecord, PositionSnapshot, ReconciliationRun, RiskPolicy, StrategyEvaluation, StrategyVersion, SystemState, TradeOutcome, TwoFactorSecret, WatchlistItem, WebhookDelivery
-from app.schemas import AccountStateResponse, AIStatusResponse, AlertAckResponse, AlertListResponse, AlertResponse, AlertRuleListResponse, AlertRuleResponse, AlertRuleUpdate, AlertUnreadResponse, AuditEventResponse, AuthLoginInput, AuthLoginResponse, AuthSessionResponse, BacktestRunInput, BacktestRunResponse, BacktestSweepInput, BacktestSweepResponse, BrokerConnectionResponse, BrokerCredentialInput, CandleResponse, FeatureResponse, HealthResponse, LoopRunResponse, LoopStatusResponse, MarketAssetResponse, MarketChartResponse, OrderIntentInput, OrderIntentResponse, OrderResponse, PositionResponse, ReconciliationResponse, ResearchRunResponse, RiskPolicyResponse, SavedPickCellResponse, StrategyComparisonResponse, StrategyCreateInput, StrategyEvaluationInput, StrategyEvaluationResponse, StrategyEvidenceResponse, StrategyFromSweepInput, StrategyResponse, StrategyStatusUpdateInput, SweepPickRecordResponse, SweepPickSaveResponse, SweepRunRecordResponse, SymbolDrilldownResponse, TotpProvisionResponse, TotpStatusResponse, TradeAnalyticsResponse, TradeResponse, WatchlistItemResponse, WatchlistUpdate, WebhookDeliveryListResponse, WebhookDeliveryResponse, WebhookPolicyResponse, WebhookTestResponse
+from app.schemas import AccountStateResponse, AIStatusResponse, AlertAckResponse, AlertListResponse, AlertResponse, AlertRuleListResponse, AlertRuleResponse, AlertRuleUpdate, AlertUnreadResponse, AuditEventResponse, AuthLoginInput, AuthLoginResponse, AuthSessionResponse, BacktestRunInput, BacktestRunResponse, BacktestSweepInput, BacktestSweepResponse, BrokerConnectionResponse, BrokerCredentialInput, CandleResponse, FeatureResponse, HealthResponse, LoopRunResponse, LoopStatusResponse, MarketAssetResponse, MarketChartResponse, OrderIntentInput, OrderIntentResponse, OrderResponse, PositionResponse, ReconciliationResponse, ResearchRunResponse, RiskPolicyResponse, RiskPolicyUpdate, SavedPickCellResponse, StrategyComparisonResponse, StrategyCreateInput, StrategyEvaluationInput, StrategyEvaluationResponse, StrategyEvidenceResponse, StrategyFromSweepInput, StrategyResponse, StrategyStatusUpdateInput, SweepPickRecordResponse, SweepPickSaveResponse, SweepRunRecordResponse, SymbolDrilldownResponse, TotpProvisionResponse, TotpStatusResponse, TradeAnalyticsResponse, TradeResponse, WatchlistItemResponse, WatchlistUpdate, WebhookDeliveryListResponse, WebhookDeliveryResponse, WebhookPolicyResponse, WebhookTestResponse
 from app.services.analytics import strategy_comparison, symbol_drilldown, trade_analytics
 from app.services.auth import SESSION_COOKIE, LoginGate, SessionConfigurationError, SessionManager, credential_ok, generate_totp_secret, otpauth_uri, totp_qr_svg, totp_verify
 from app.services import alerts as alerting
@@ -325,6 +326,54 @@ def active_risk_policy(session: Session = Depends(get_session)) -> RiskPolicy:
     if policy is None:
         raise HTTPException(status_code=500, detail="No active risk policy exists.")
     return policy
+
+
+@app.put(f"{settings.api_prefix}/risk", response_model=RiskPolicyResponse, dependencies=[Depends(_require_local_admin)], tags=["risk"])
+def replace_risk_policy(payload: RiskPolicyUpdate, session: Session = Depends(get_session)) -> RiskPolicy:
+    """Activate a new, versioned risk policy. Old versions are never mutated.
+
+    Caps are bounded by hard ceilings stricter than the defaults so a typo can
+    only ever tighten, not explode, exposure. The daily-loss cap may not exceed
+    the drawdown cap: the daily brake should always trip first. The loop and
+    execution service read the active policy on every tick, so the change
+    takes effect on the next cycle without a restart.
+    """
+    if payload.max_daily_loss_fraction > payload.max_drawdown_fraction:
+        raise HTTPException(status_code=422, detail="The daily-loss cap must not exceed the drawdown cap; the daily brake must trip first.")
+    current = session.scalar(select(RiskPolicy).where(RiskPolicy.active.is_(True)).order_by(RiskPolicy.id.desc()).limit(1))
+    if current is None:
+        raise HTTPException(status_code=500, detail="No active risk policy exists.")
+    highest = 0
+    for version in session.scalars(select(RiskPolicy.version)):
+        match = re.fullmatch(r"risk-v(\d+)", version)
+        if match:
+            highest = max(highest, int(match.group(1)))
+    replacement = RiskPolicy(
+        version=f"risk-v{highest + 1}",
+        max_risk_fraction=payload.max_risk_fraction,
+        max_trade_amount=payload.max_trade_amount,
+        max_daily_loss_fraction=payload.max_daily_loss_fraction,
+        max_drawdown_fraction=payload.max_drawdown_fraction,
+        max_open_positions=payload.max_open_positions,
+        stale_market_seconds=payload.stale_market_seconds,
+        active=True,
+    )
+    current.active = False
+    session.add(replacement)
+    session.add(AuditEvent(
+        event_type="RISK_POLICY_UPDATED",
+        severity="INFO",
+        message=f"Risk policy {replacement.version} activated; {current.version} retired.",
+        payload={
+            "retired_version": current.version,
+            "activated_version": replacement.version,
+            "caps": payload.model_dump(),
+        },
+    ))
+    session.commit()
+    session.refresh(replacement)
+    publish_event("risk.policy_updated", {"version": replacement.version})
+    return replacement
 
 
 @app.get(f"{settings.api_prefix}/strategies", response_model=list[StrategyResponse], tags=["strategies"])

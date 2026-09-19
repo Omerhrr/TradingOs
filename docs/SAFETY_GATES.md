@@ -6,7 +6,7 @@ TradingOS is engineered as a **practice-first system**, not as an unchecked rout
 |---|---|---|
 | Broker identity | Credentials are encrypted at rest and connection selects `PRACTICE`, then verifies the resulting balance mode. | Account connection and reconciliation must succeed repeatedly without mode drift. |
 | Market freshness | An intent is rejected when its latest candle is older than the policy threshold. | Freshness behaviour must be proven under disconnect and restart conditions. |
-| Risk approval | Exposure, trade amount, daily-loss, drawdown, broker state, system state, and strategy status are checked deterministically. | Results must be reviewed across meaningful practice history. |
+| Risk approval | Exposure, trade amount, daily-loss, drawdown, broker state, system state, and strategy status are checked deterministically. The active policy is operator-tunable via `PUT /api/v1/risk`: caps are bounded by hard ceilings stricter than the defaults, the daily-loss cap may never exceed the drawdown cap, old versions are retired (never mutated), and every change is audited. | Results must be reviewed across meaningful practice history. |
 | Strategy quality | A strategy starts as `DRAFT`; only time-ordered, censored validation can mark it `VALIDATED`. | Separate out-of-sample and long practice observation periods are required. |
 | AI output | AI is opt-in, rate-limited, token-budgeted, and returns structured hypotheses only. It has no broker or order import path. | Any change to that separation requires a separate security review. |
 | Practice execution | Intent creation is separate from submission. Submission defaults to disabled. | The operator must explicitly change the local practice setting after verifying all prior gates. |

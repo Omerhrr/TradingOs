@@ -1,6 +1,6 @@
 <!-- Design: The Instrument Room — a local-only, high-trust setup console where safety and evidence are more prominent than action. -->
 <script setup lang="ts">
-import type { AIStatus, BrokerConnection, ReconciliationRun, TotpProvision, TotpStatus } from '~/types/trading'
+import type { AIStatus, BrokerConnection, ReconciliationRun, RiskPolicy, TotpProvision, TotpStatus } from '~/types/trading'
 
 const api = useTradingApi()
 const adminToken = ref('')
@@ -19,6 +19,31 @@ const totpBusy = ref(false)
 const totpError = ref<string | null>(null)
 const aiStatus = ref<AIStatus | null>(null)
 const aiError = ref<string | null>(null)
+const riskPolicy = ref<RiskPolicy | null>(null)
+const riskForm = ref<RiskPolicyForm | null>(null)
+const riskBusy = ref(false)
+const riskError = ref<string | null>(null)
+const riskNotice = ref<string | null>(null)
+
+interface RiskPolicyForm {
+  max_risk_fraction: number
+  max_trade_amount: number
+  max_daily_loss_fraction: number
+  max_drawdown_fraction: number
+  max_open_positions: number
+  stale_market_seconds: number
+}
+
+function formFromPolicy(policy: RiskPolicy): RiskPolicyForm {
+  return {
+    max_risk_fraction: policy.max_risk_fraction,
+    max_trade_amount: policy.max_trade_amount,
+    max_daily_loss_fraction: policy.max_daily_loss_fraction,
+    max_drawdown_fraction: policy.max_drawdown_fraction,
+    max_open_positions: policy.max_open_positions,
+    stale_market_seconds: policy.stale_market_seconds,
+  }
+}
 
 function messageFor(error: unknown, fallback: string) {
   if (error && typeof error === 'object' && 'data' in error) {
@@ -32,6 +57,7 @@ onMounted(() => {
   adminToken.value = window.sessionStorage.getItem('tradingos-local-admin-token') ?? ''
   refreshTotpState()
   refreshAiStatus()
+  refreshRiskPolicy()
 })
 
 async function refreshAiStatus() {
@@ -135,6 +161,33 @@ const aiStateChip = computed(() => {
   if (!aiStatus.value.ai_enabled) return 'DISABLED'
   return 'MISCONFIGURED'
 })
+
+async function refreshRiskPolicy() {
+  try {
+    const policy = await api.getRisk()
+    riskPolicy.value = policy
+    riskForm.value = formFromPolicy(policy)
+  } catch {
+    riskPolicy.value = null
+  }
+}
+
+async function saveRiskPolicy() {
+  if (!riskForm.value) return
+  riskError.value = null
+  riskNotice.value = null
+  riskBusy.value = true
+  try {
+    const updated = await api.updateRiskPolicy(adminToken.value.trim(), riskForm.value)
+    riskPolicy.value = updated
+    riskForm.value = formFromPolicy(updated)
+    riskNotice.value = `Risk policy ${updated.version} is now active. The loop applies it on the next tick; the change is recorded in the audit trail.`
+  } catch (error) {
+    riskError.value = messageFor(error, 'The risk policy could not be updated. Check the caps against the hard ceilings.')
+  } finally {
+    riskBusy.value = false
+  }
+}
 </script>
 
 <template>
@@ -242,6 +295,22 @@ const aiStateChip = computed(() => {
         <button class="setup-action setup-action--quiet" type="button" :disabled="!adminToken.trim()" @click="refreshAiStatus">RE-PROBE READINESS</button>
       </div>
     </section>
+
+    <section class="setup-card setup-card--actions">
+      <div class="setup-heading"><div><p class="mono eyebrow">05 / RISK GOVERNANCE</p><h2>Exposure caps</h2></div><span class="connection-chip connection-chip--ready">{{ riskPolicy ? riskPolicy.version.toUpperCase() : 'UNAVAILABLE' }}</span></div>
+      <p v-if="riskError" class="setup-error">{{ riskError }}</p>
+      <p v-if="riskNotice" class="setup-notice">{{ riskNotice }}</p>
+      <p class="setup-summary">Saving replaces the active policy with a new version — retired versions stay in the database untouched, and the change lands in the audit trail. Hard ceilings bound every cap: a typo can only tighten exposure, never explode it, and the daily-loss brake must always trip before the drawdown brake.</p>
+      <form v-if="riskForm" class="risk-form" @submit.prevent="saveRiskPolicy">
+        <label><span>Per-trade risk (fraction of balance, ≤ 0.01)</span><input v-model.number="riskForm.max_risk_fraction" type="number" step="0.0001" min="0.0001" max="0.01" required></label>
+        <label><span>Per-trade amount ceiling (≤ 25)</span><input v-model.number="riskForm.max_trade_amount" type="number" step="0.5" min="0.5" max="25" required></label>
+        <label><span>Daily-loss brake (fraction, ≤ 0.10)</span><input v-model.number="riskForm.max_daily_loss_fraction" type="number" step="0.005" min="0.005" max="0.1" required></label>
+        <label><span>Drawdown brake (fraction, ≤ 0.20)</span><input v-model.number="riskForm.max_drawdown_fraction" type="number" step="0.01" min="0.01" max="0.2" required></label>
+        <label><span>Concurrent positions (1–5)</span><input v-model.number="riskForm.max_open_positions" type="number" step="1" min="1" max="5" required></label>
+        <label><span>Stale-market threshold (seconds, 30–600)</span><input v-model.number="riskForm.stale_market_seconds" type="number" step="10" min="30" max="600" required></label>
+        <button class="setup-action" type="submit" :disabled="riskBusy || !adminToken.trim()">{{ riskBusy ? 'ACTIVATING…' : 'ACTIVATE NEW RISK POLICY' }}</button>
+      </form>
+    </section>
   </main>
 </template>
 
@@ -260,4 +329,11 @@ const aiStateChip = computed(() => {
 .ai-readout { display: grid; gap: 6px; margin: 6px 0 14px; }
 .ai-readout-row { display: flex; justify-content: space-between; gap: 12px; border-bottom: 1px dashed rgba(235,232,223,.12); padding: 5px 0; font-size: 12px; }
 .ai-readout-row span { color: var(--quiet); letter-spacing: .08em; }
+.risk-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 18px; margin: 14px 0; }
+.risk-form label { display: grid; gap: 5px; font-size: 11px; color: var(--quiet); }
+.risk-form label span { letter-spacing: .06em; text-transform: uppercase; }
+.risk-form input { background: rgba(10,14,13,.55); border: 1px solid rgba(235,232,223,.18); color: var(--paper); padding: 8px 10px; font: inherit; }
+.risk-form input:focus { outline: 1px solid rgba(184,154,106,.6); outline-offset: 1px; }
+.risk-form button { grid-column: 1 / -1; justify-self: start; }
+@media (max-width: 640px) { .risk-form { grid-template-columns: 1fr; } }
 </style>

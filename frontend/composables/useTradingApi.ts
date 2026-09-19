@@ -34,6 +34,7 @@ export function useTradingApi() {
   return {
     getState: () => request<SystemState>('/state'),
     getRisk: () => request<RiskPolicy>('/risk'),
+    updateRiskPolicy: (adminToken: string, payload: Omit<RiskPolicy, 'version' | 'active'>) => localControl<RiskPolicy>('/risk', adminToken, { method: 'PUT', body: payload }),
     getEvents: () => request<AuditEvent[]>('/events'),
     getWatchlist: () => request<WatchlistItem[]>('/watchlist'),
     getStrategies: () => request<StrategyVersion[]>('/strategies'),

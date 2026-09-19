@@ -55,6 +55,18 @@ class RiskPolicyResponse(BaseModel):
     active: bool
 
 
+class RiskPolicyUpdate(BaseModel):
+    """A complete replacement risk policy. Every cap must be restated so a
+    partial request can never silently loosen an unstated dimension."""
+
+    max_risk_fraction: float = Field(ge=0.0001, le=0.01, description="Fraction of balance risked per trade; hard ceiling 1%.")
+    max_trade_amount: float = Field(gt=0, le=25.0, description="Absolute per-trade amount ceiling; hard ceiling 25.")
+    max_daily_loss_fraction: float = Field(ge=0.005, le=0.10, description="Daily realized-loss fraction that halts new entries.")
+    max_drawdown_fraction: float = Field(ge=0.01, le=0.20, description="Peak-to-trough drawdown fraction that halts new entries.")
+    max_open_positions: int = Field(ge=1, le=5, description="Maximum concurrent open positions.")
+    stale_market_seconds: int = Field(ge=30, le=600, description="Candle age beyond which new intents are rejected.")
+
+
 class StrategyResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int
