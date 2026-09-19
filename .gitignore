@@ -16,3 +16,4 @@ frontend/.env
 api.log
 ui.log
 stack-keeper.log
+backend/data/

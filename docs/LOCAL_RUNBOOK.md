@@ -23,6 +23,8 @@ Run `bash scripts/start_local.sh` from the repository root. Verify the service u
 
 After encrypted credentials have been stored and a manual PRACTICE connection and reconciliation have succeeded, setting `TRADINGOS_AUTO_RECONCILE_ENABLED=true` starts a single local background worker. It maintains one practice-broker session and reconciles on the configured interval. On a background connection or reconciliation error, the worker moves the account to `HALTED`, disconnects the broker, and does not resume on its own. The loop starts disabled by default.
 
+`HALTED` is a latched fail-closed state, and the API enforces it: `POST /api/v1/system/resume` refuses with 409 while the account is `HALTED`, because un-halting through the API would set `ACTIVE` while the background worker thread stays down — only restarting the service re-arms the runtime. The control plane mirrors this: the exposure toggle on the evidence log reads `PAUSED → RESUME NEW EXPOSURE` / `ACTIVE → PAUSE NEW EXPOSURE`, surfaces the backend's 409 detail when a resume is refused, and shows `HALTED — RESTART SERVICE` (disabled) in that state. Closing a broker session from the Local setup page (`POST /api/v1/broker/disconnect`) is likewise one click, and section 04 can fire one budget-capped research pass once the LLM probe reports READY.
+
 > The credential endpoint requires `X-TradingOS-Token` and stores only Fernet-encrypted values in the local SQLAlchemy database. Keep the encryption key and local admin token outside the repository and password manager-sync them as separate secrets.
 
 ## Backtest lab and two-factor login

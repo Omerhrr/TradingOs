@@ -5,8 +5,8 @@ import type { AlertList, AlertRow, AuditEvent, LoopRun, LoopStatus, MarketChart,
 const api = useTradingApi()
 const auth = useAuth()
 const { status: socketStatus, events: socketEvents, isConnected } = useLoopSocket()
-const isPausing = ref(false)
-const pauseError = ref<string | null>(null)
+const isTogglingExposure = ref(false)
+const exposureError = ref<string | null>(null)
 const isTicking = ref(false)
 const tickError = ref<string | null>(null)
 const tickNotice = ref<string | null>(null)
@@ -128,16 +128,24 @@ async function acknowledgeAllAlerts() {
   }
 }
 
-async function pauseSystem() {
-  isPausing.value = true
-  pauseError.value = null
+const systemState = computed(() => state.value?.system_state ?? 'PAUSED')
+
+async function toggleExposure() {
+  // The control is state-aware: ACTIVE pauses, PAUSED resumes (the backend
+  // answers 409 when the practice broker is not connected or the runtime is
+  // HALTED), HALTED is a latched service-restart state and the button says so.
+  if (systemState.value === 'HALTED') return
+  isTogglingExposure.value = true
+  exposureError.value = null
   try {
-    await api.pause()
+    if (systemState.value === 'PAUSED') await api.resume()
+    else await api.pause()
     await Promise.all([refreshState(), refreshReconciliations(), refreshLoopStatus(), refreshLoopRuns()])
   } catch (error) {
-    pauseError.value = error instanceof Error ? error.message : 'The pause request could not be confirmed.'
+    const detail = (error as { data?: { detail?: string } })?.data?.detail
+    exposureError.value = detail ?? (error instanceof Error ? error.message : 'The exposure request could not be confirmed.')
   } finally {
-    isPausing.value = false
+    isTogglingExposure.value = false
   }
 }
 
@@ -620,11 +628,11 @@ function socketEventNote(type: string, payload: Record<string, unknown>): string
             <p class="mono eyebrow">APPEND-ONLY RECORD</p>
             <h3>Evidence log</h3>
           </div>
-          <button class="pause-control" type="button" :disabled="isPausing || statePending" @click="pauseSystem">
-            <span></span>{{ isPausing ? 'CONFIRMING…' : 'PAUSE NEW EXPOSURE' }}
+          <button class="pause-control" :class="{ 'pause-control--resume': systemState === 'PAUSED', 'pause-control--halted': systemState === 'HALTED' }" type="button" :disabled="isTogglingExposure || statePending || systemState === 'HALTED'" :title="systemState === 'HALTED' ? 'HALTED is latched fail-closed: restart the TradingOS service to re-arm the runtime.' : systemState === 'PAUSED' ? 'Resume requires a connected practice broker.' : 'Pause rejects every new intent until resumed.'" @click="toggleExposure">
+            <span></span>{{ isTogglingExposure ? 'CONFIRMING…' : systemState === 'HALTED' ? 'HALTED — RESTART SERVICE' : systemState === 'PAUSED' ? 'RESUME NEW EXPOSURE' : 'PAUSE NEW EXPOSURE' }}
           </button>
         </div>
-        <p v-if="pauseError" class="error-note">{{ pauseError }}</p>
+        <p v-if="exposureError" class="error-note">{{ exposureError }}</p>
         <p v-if="stateError" class="error-note">The system state is unavailable. The interface assumes a halt until it can be confirmed.</p>
         <div class="event-table" role="table" aria-label="System evidence log">
           <div class="event-row event-row--head" role="row"><span>TIME</span><span>EVENT</span><span>INTERPRETATION</span><span>SEVERITY</span></div>

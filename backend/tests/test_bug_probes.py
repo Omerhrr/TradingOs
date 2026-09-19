@@ -300,6 +300,36 @@ def test_bug6b_resume_rejection_is_audited() -> None:
     assert after[0]["event_type"] == "SYSTEM_RESUME_REJECTED"
 
 
+def test_bug6d_halted_is_not_resumable() -> None:
+    """HALTED is the runtime's latched fail-closed state: resume must refuse it.
+
+    Un-halting through the API would set ACTIVE while the background worker
+    thread stays latched down - a half-recovered state where the UI claims
+    ACTIVE but nothing autonomously ticks. Only a service restart re-arms it.
+    """
+    from fastapi.testclient import TestClient
+    from sqlalchemy import select
+
+    from app.main import app
+    from app.models import AccountConfig, SystemState
+
+    with TestClient(app) as client:
+        with SessionLocal() as session:
+            account = session.scalar(select(AccountConfig).limit(1))
+            account.system_state = SystemState.HALTED.value
+            session.commit()
+        before = client.get("/api/v1/events").json()
+        response = client.post("/api/v1/system/resume")
+        after = client.get("/api/v1/events").json()
+        with SessionLocal() as session:
+            account = session.scalar(select(AccountConfig).limit(1))
+            assert account.system_state == SystemState.HALTED.value
+    assert response.status_code == 409
+    assert "HALTED" in response.json()["detail"]
+    assert after[0]["event_type"] == "SYSTEM_RESUME_REJECTED"
+    assert len(after) == len(before) + 1
+
+
 def test_bug6c_resume_success_is_audited() -> None:
     """A successful resume must also be auditable (parity with pause)."""
     from fastapi.testclient import TestClient

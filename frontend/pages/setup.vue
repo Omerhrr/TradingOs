@@ -1,13 +1,13 @@
 <!-- Design: The Instrument Room — a local-only, high-trust setup console where safety and evidence are more prominent than action. -->
 <script setup lang="ts">
-import type { AIStatus, BrokerConnection, ReconciliationRun, RiskPolicy, TotpProvision, TotpStatus } from '~/types/trading'
+import type { AIStatus, BrokerConnection, ReconciliationRun, ResearchRun, RiskPolicy, TotpProvision, TotpStatus } from '~/types/trading'
 
 const api = useTradingApi()
 const adminToken = ref('')
 const email = ref('')
 const password = ref('')
 const showPassword = ref(false)
-const busy = ref<'store' | 'connect' | 'reconcile' | null>(null)
+const busy = ref<'store' | 'connect' | 'reconcile' | 'disconnect' | null>(null)
 const errorMessage = ref<string | null>(null)
 const notice = ref<string | null>(null)
 const credentialStored = ref(false)
@@ -19,6 +19,9 @@ const totpBusy = ref(false)
 const totpError = ref<string | null>(null)
 const aiStatus = ref<AIStatus | null>(null)
 const aiError = ref<string | null>(null)
+const researchRun = ref<ResearchRun | null>(null)
+const researchBusy = ref(false)
+const researchError = ref<string | null>(null)
 const riskPolicy = ref<RiskPolicy | null>(null)
 const riskForm = ref<RiskPolicyForm | null>(null)
 const riskBusy = ref(false)
@@ -115,6 +118,33 @@ async function runReconciliation() {
     errorMessage.value = messageFor(error, 'Reconciliation could not be completed. New exposure remains paused.')
   } finally {
     busy.value = null
+  }
+}
+
+async function disconnectBroker() {
+  errorMessage.value = null
+  notice.value = null
+  busy.value = 'disconnect'
+  try {
+    connection.value = await api.disconnectBroker(adminToken.value.trim())
+    notice.value = 'The practice broker session was closed. The system stays fail-closed until a new verified connection.'
+  } catch (error) {
+    errorMessage.value = messageFor(error, 'The broker session could not be closed cleanly. Check the local API.')
+  } finally {
+    busy.value = null
+  }
+}
+
+async function runResearchPass() {
+  researchError.value = null
+  researchBusy.value = true
+  try {
+    researchRun.value = await api.runResearch(adminToken.value.trim())
+    await refreshAiStatus()
+  } catch (error) {
+    researchError.value = messageFor(error, 'The research pass could not be completed.')
+  } finally {
+    researchBusy.value = false
   }
 }
 
@@ -245,6 +275,7 @@ async function saveRiskPolicy() {
       <div class="setup-actions">
         <button class="setup-action setup-action--quiet" type="button" :disabled="busy !== null || !credentialStored" @click="connectPractice">{{ busy === 'connect' ? 'VERIFYING…' : 'CONNECT TO PRACTICE' }}</button>
         <button class="setup-action setup-action--quiet" type="button" :disabled="busy !== null || !isPracticeConnected" @click="runReconciliation">{{ busy === 'reconcile' ? 'RECONCILING…' : 'RUN RECONCILIATION' }}</button>
+        <button class="setup-action setup-action--quiet pause-control" type="button" :disabled="busy !== null || connection?.state !== 'CONNECTED'" @click="disconnectBroker">{{ busy === 'disconnect' ? 'CLOSING…' : 'CLOSE BROKER SESSION' }}</button>
         <NuxtLink class="setup-return" to="/">REVIEW CONTROL PLANE →</NuxtLink>
       </div>
       <p v-if="reconciliation" class="setup-summary">Latest run: <strong>{{ reconciliation.state }}</strong> · {{ reconciliation.summary?.candles_ingested ?? 0 }} candles ingested · {{ reconciliation.summary?.positions_observed ?? 0 }} positions observed.</p>
@@ -293,7 +324,15 @@ async function saveRiskPolicy() {
       </div>
       <div class="setup-actions">
         <button class="setup-action setup-action--quiet" type="button" :disabled="!adminToken.trim()" @click="refreshAiStatus">RE-PROBE READINESS</button>
+        <button class="setup-action setup-action--quiet" type="button" :disabled="researchBusy || !adminToken.trim() || !aiStatus?.ready" :title="aiStatus?.ready ? 'One budget-capped, read-only hypothesis pass.' : 'The LLM probe must report READY first (set the environment block and restart the backend).'" @click="runResearchPass">{{ researchBusy ? 'RESEARCHING…' : 'RUN RESEARCH PASS' }}</button>
       </div>
+      <p v-if="researchError" class="setup-error">{{ researchError }}</p>
+      <div v-if="researchRun" class="ai-readout">
+        <div class="ai-readout-row"><span>LAST RUN</span><strong class="mono">{{ researchRun.status }} · {{ researchRun.completed_at ?? researchRun.created_at }}</strong></div>
+        <div class="ai-readout-row"><span>DISPOSITION</span><strong class="mono">{{ researchRun.output?.disposition ?? '—' }} · CONFIDENCE {{ researchRun.output?.confidence ?? '—' }}</strong></div>
+        <div class="ai-readout-row"><span>THESIS</span><strong class="ai-thesis">{{ researchRun.output?.thesis ?? 'No persisted thesis.' }}</strong></div>
+      </div>
+      <p class="setup-summary">A research pass consumes the daily budget, reads only the compact market/validation digest, and persists a typed hypothesis (disposition, thesis, risk flags, next validation steps) — it cannot place orders or reach the broker.</p>
     </section>
 
     <section class="setup-card setup-card--actions">
@@ -315,6 +354,7 @@ async function saveRiskPolicy() {
 </template>
 
 <style scoped>
+.ai-thesis { font-weight: 400; color: var(--quiet, #9aa39e); text-transform: none; letter-spacing: 0; white-space: normal; text-align: right; max-width: 420px; }
 .totp-reveal { align-items: flex-start; }
 .totp-secret { font-size: 13px; letter-spacing: .12em; color: var(--paper); margin: 4px 0; }
 .totp-uri { font-size: 10px; color: var(--quiet); margin: 0; overflow-wrap: anywhere; }

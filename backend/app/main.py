@@ -948,8 +948,18 @@ def pause_system(session: Session = Depends(get_session)) -> AccountStateRespons
 @app.post(f"{settings.api_prefix}/system/resume", response_model=AccountStateResponse, tags=["system"])
 def resume_system(session: Session = Depends(get_session)) -> AccountStateResponse:
     account = _account(session)
+    if account.system_state == SystemState.HALTED.value:
+        # HALTED is the runtime's latched fail-closed contract (LOCAL_RUNBOOK:
+        # the worker "does not resume on its own" after a broker/reconciliation
+        # error). Un-halting here would set ACTIVE while the background worker
+        # thread stays latched down - a half-recovered state where the UI says
+        # ACTIVE but nothing autonomously ticks. Only a service restart re-arms
+        # the runtime, so resume must refuse HALTED explicitly.
+        session.add(AuditEvent(event_type="SYSTEM_RESUME_REJECTED", severity="WARNING", message="HALTED is a latched fail-closed state; restart the service to re-arm the runtime.", payload={"from_state": account.system_state}))
+        session.commit()
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="HALTED is latched fail-closed: restart the TradingOS service to re-arm the autonomous runtime.")
     if account.mode != "PRACTICE" or worker.adapter.health().state != "CONNECTED":
-        session.add(AuditEvent(event_type="SYSTEM_RESUME_REJECTED", severity="WARNING", message="Resume requires a connected practice broker; no state change occurred.", payload={}))
+        session.add(AuditEvent(event_type="SYSTEM_RESUME_REJECTED", severity="WARNING", message="Resume requires a connected practice broker; no state change occurred.", payload={"from_state": account.system_state}))
         session.commit()
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Cannot resume: practice mode and a reconciled broker connection are required.")
     account.system_state = SystemState.ACTIVE.value
